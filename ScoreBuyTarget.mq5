@@ -19,10 +19,9 @@ input int SumitSma3Period = 3;
 input int SumitSma201Period = 201;
 input int EntryScoreThreshold = -2; // score <= 30 (score < -1 in Python scale)
 
-// EMA200 Filter
-input bool UseEma200Filter = true;       // Enable EMA200 bullish filter
-input int Ema200Period = 200;             // EMA200 period
-input bool CheckEmaSlope = true;          // Check if EMA200 is sloping up
+// MA201 Filter (uses existing SMA201 handle)
+input bool UseEma200Filter = true;       // Enable MA201 bullish filter
+input bool CheckEmaSlope = true;          // Check if MA201 is sloping up
 input int EmaSlopeBars = 5;               // Bars to check slope (current vs X bars ago)
 
 // Trading logic
@@ -60,7 +59,6 @@ datetime last_bar_time = 0;
 int rsiHandle = INVALID_HANDLE;
 int ma3Handle = INVALID_HANDLE;
 int ma201Handle = INVALID_HANDLE;
-int ema200Handle = INVALID_HANDLE;  // EMA200 handle
 
 //+------------------------------------------------------------------+
 //| Utility                                                         |
@@ -117,7 +115,7 @@ void UpdateLastEntryFromOpen()
 }
 
 //+------------------------------------------------------------------+
-//| EMA200 Bullish Confirmation                                     |
+//| MA201 Bullish Confirmation                                      |
 //+------------------------------------------------------------------+
 bool IsBullishConfirmed()
 {
@@ -129,27 +127,27 @@ bool IsBullishConfirmed()
    ArraySetAsSeries(close, true);
    if(CopyClose(_Symbol, PERIOD_CURRENT, 0, 10, close) <= 0)
    {
-      Print("Failed to get close prices for EMA200 filter");
+      Print("Failed to get close prices for MA201 filter");
       return false;
    }
    
-   // Get EMA200 values
-   double ema200[];
-   ArraySetAsSeries(ema200, true);
+   // Get MA201 values
+   double ma201[];
+   ArraySetAsSeries(ma201, true);
    int copyBars = MathMax(10, EmaSlopeBars + 5);
-   if(CopyBuffer(ema200Handle, 0, 0, copyBars, ema200) <= 0)
+   if(CopyBuffer(ma201Handle, 0, 0, copyBars, ma201) <= 0)
    {
-      Print("Failed to get EMA200 values");
+      Print("Failed to get MA201 values");
       return false;
    }
    
-   // Check 1: Current close price must be ABOVE EMA200
-   if(close[1] <= ema200[1])  // Using bar 1 (completed bar)
+   // Check 1: Current close price must be ABOVE MA201
+   if(close[1] <= ma201[1])  // Using bar 1 (completed bar)
    {
-      return false;  // Price not above EMA200
+      return false;  // Price not above MA201
    }
    
-   // Check 2: EMA200 must be sloping UP (optional)
+   // Check 2: MA201 must be sloping UP (optional)
    if(CheckEmaSlope)
    {
       if(EmaSlopeBars < 2)
@@ -158,12 +156,12 @@ bool IsBullishConfirmed()
          return false;
       }
       
-      double ema_current = ema200[1];
-      double ema_past = ema200[EmaSlopeBars];
+      double ma_current = ma201[1];
+      double ma_past = ma201[EmaSlopeBars];
       
-      if(ema_current <= ema_past)
+      if(ma_current <= ma_past)
       {
-         return false;  // EMA200 is not sloping up
+         return false;  // MA201 is not sloping up
       }
    }
    
@@ -504,17 +502,8 @@ int OnInit()
       return(INIT_FAILED);
    }
 
-   // Initialize EMA200 handle
    if(UseEma200Filter)
-   {
-      ema200Handle = iMA(_Symbol, PERIOD_CURRENT, Ema200Period, 0, MODE_EMA, PRICE_CLOSE);
-      if(ema200Handle == INVALID_HANDLE)
-      {
-         Print("Failed to create EMA200 handle");
-         return(INIT_FAILED);
-      }
-      Print("EMA200 filter enabled with slope check: ", CheckEmaSlope ? "Yes" : "No");
-   }
+      Print("MA201 filter enabled with slope check: ", CheckEmaSlope ? "Yes" : "No");
 
    return(INIT_SUCCEEDED);
 }
@@ -527,8 +516,6 @@ void OnDeinit(const int reason)
       IndicatorRelease(ma3Handle);
    if(ma201Handle != INVALID_HANDLE)
       IndicatorRelease(ma201Handle);
-   if(ema200Handle != INVALID_HANDLE)
-      IndicatorRelease(ema200Handle);
 }
 
 //+------------------------------------------------------------------+
