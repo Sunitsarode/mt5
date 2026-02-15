@@ -1,9 +1,10 @@
 //+------------------------------------------------------------------+
-//|                         ScoreBuy Strategy (EA)  |
+//|                         ScoreBuy Strategy (EA) with EMA200       |
 // Based on SUMIT_RSI_Score.. Target 5points for XAU-USD
+// Added: EMA200 bullish filter with slope confirmation
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -17,6 +18,12 @@ input int Rsi1hSellThreshold = 55;
 input int SumitSma3Period = 3;
 input int SumitSma201Period = 201;
 input int EntryScoreThreshold = -2; // score <= 30 (score < -1 in Python scale)
+
+// EMA200 Filter
+input bool UseEma200Filter = true;       // Enable EMA200 bullish filter
+input int Ema200Period = 200;             // EMA200 period
+input bool CheckEmaSlope = true;          // Check if EMA200 is sloping up
+input int EmaSlopeBars = 5;               // Bars to check slope (current vs X bars ago)
 
 // Trading logic
 input double TargetPoints = 5.0;
@@ -53,6 +60,7 @@ datetime last_bar_time = 0;
 int rsiHandle = INVALID_HANDLE;
 int ma3Handle = INVALID_HANDLE;
 int ma201Handle = INVALID_HANDLE;
+int ema200Handle = INVALID_HANDLE;  // EMA200 handle
 
 //+------------------------------------------------------------------+
 //| Utility                                                         |
@@ -106,6 +114,60 @@ void UpdateLastEntryFromOpen()
          last_entry_lot = tranches[i].volume;
       }
    }
+}
+
+//+------------------------------------------------------------------+
+//| EMA200 Bullish Confirmation                                     |
+//+------------------------------------------------------------------+
+bool IsBullishConfirmed()
+{
+   if(!UseEma200Filter)
+      return true;  // Filter disabled, always allow trading
+   
+   // Get close prices
+   double close[];
+   ArraySetAsSeries(close, true);
+   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, 10, close) <= 0)
+   {
+      Print("Failed to get close prices for EMA200 filter");
+      return false;
+   }
+   
+   // Get EMA200 values
+   double ema200[];
+   ArraySetAsSeries(ema200, true);
+   int copyBars = MathMax(10, EmaSlopeBars + 5);
+   if(CopyBuffer(ema200Handle, 0, 0, copyBars, ema200) <= 0)
+   {
+      Print("Failed to get EMA200 values");
+      return false;
+   }
+   
+   // Check 1: Current close price must be ABOVE EMA200
+   if(close[1] <= ema200[1])  // Using bar 1 (completed bar)
+   {
+      return false;  // Price not above EMA200
+   }
+   
+   // Check 2: EMA200 must be sloping UP (optional)
+   if(CheckEmaSlope)
+   {
+      if(EmaSlopeBars < 2)
+      {
+         Print("EmaSlopeBars must be >= 2 for slope check");
+         return false;
+      }
+      
+      double ema_current = ema200[1];
+      double ema_past = ema200[EmaSlopeBars];
+      
+      if(ema_current <= ema_past)
+      {
+         return false;  // EMA200 is not sloping up
+      }
+   }
+   
+   return true;  // All bullish conditions met
 }
 
 //+------------------------------------------------------------------+
@@ -293,6 +355,8 @@ void RebuildTranchesFromPositions(const bool hedging)
    if(ptotal <= 0)
       return;
 
+   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
+
    for(int i = 0; i < ptotal; i++)
    {
       ulong ticket = PositionGetTicket(i);
@@ -314,7 +378,7 @@ void RebuildTranchesFromPositions(const bool hedging)
       t.time_open = (datetime)PositionGetInteger(POSITION_TIME);
       t.entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
       t.volume = PositionGetDouble(POSITION_VOLUME);
-      t.target_price = t.entry_price + TargetPoints;
+      t.target_price = t.entry_price + TargetPoints * pt;  // Fixed with point multiplication
       t.closed = false;
 
       int sz = ArraySize(tranches);
@@ -329,13 +393,15 @@ void RebuildTranchesFromPositions(const bool hedging)
 
 bool AddTranche(const double entry_price, const double volume, const ulong ticket)
 {
+   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
+   
    Tranche t;
    t.seq = ++next_seq;
    t.ticket = ticket;
    t.time_open = TimeCurrent();
    t.entry_price = entry_price;
    t.volume = volume;
-   t.target_price = entry_price + TargetPoints;
+   t.target_price = entry_price + TargetPoints * pt;  // Fixed with point multiplication
    t.closed = false;
 
    int sz = ArraySize(tranches);
@@ -438,6 +504,18 @@ int OnInit()
       return(INIT_FAILED);
    }
 
+   // Initialize EMA200 handle
+   if(UseEma200Filter)
+   {
+      ema200Handle = iMA(_Symbol, PERIOD_CURRENT, Ema200Period, 0, MODE_EMA, PRICE_CLOSE);
+      if(ema200Handle == INVALID_HANDLE)
+      {
+         Print("Failed to create EMA200 handle");
+         return(INIT_FAILED);
+      }
+      Print("EMA200 filter enabled with slope check: ", CheckEmaSlope ? "Yes" : "No");
+   }
+
    return(INIT_SUCCEEDED);
 }
 
@@ -449,6 +527,8 @@ void OnDeinit(const int reason)
       IndicatorRelease(ma3Handle);
    if(ma201Handle != INVALID_HANDLE)
       IndicatorRelease(ma201Handle);
+   if(ema200Handle != INVALID_HANDLE)
+      IndicatorRelease(ema200Handle);
 }
 
 //+------------------------------------------------------------------+
@@ -467,6 +547,13 @@ void OnTick()
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
    CheckTargets(hedging, bid);
+
+   // *** CHECK BULLISH CONFIRMATION FIRST ***
+   if(!IsBullishConfirmed())
+   {
+      // Price is below EMA200 or EMA200 is not sloping up - no new entries
+      return;
+   }
 
    if(UseNewBar)
    {
@@ -492,7 +579,8 @@ void OnTick()
 
       if(last_entry_price_ref > 0.0)
       {
-         if(MathAbs(bid - last_entry_price_ref) < StepPoints)
+         double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
+         if(MathAbs(bid - last_entry_price_ref) < StepPoints * pt)  // Fixed with point multiplication
             return;
       }
 
@@ -506,7 +594,8 @@ void OnTick()
    if(!scoreOk)
       return;
 
-   if(last_entry_price_open > 0.0 && bid <= (last_entry_price_open - StepPoints))
+   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
+   if(last_entry_price_open > 0.0 && bid <= (last_entry_price_open - StepPoints * pt))  // Fixed with point multiplication
    {
       double nextLot = last_entry_lot;
       if(nextLot <= 0.0)
