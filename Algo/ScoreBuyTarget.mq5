@@ -25,7 +25,8 @@ input bool CheckEmaSlope = true;          // Check if MA201 is sloping up
 input int EmaSlopeBars = 5;               // Bars to check slope (current vs X bars ago)
 
 // Trading logic
-input double TargetPoints = 5.0;
+input double MinTargetPoints = 5.0;   // Minimum TP distance in points
+input double TargetPercent = 0.01;    // TP distance in percent of entry price
 input double StepPoints = 5.0;
 input double LotSize = 0.01;
 input double LotStep = 0.01;
@@ -81,6 +82,14 @@ double NormalizeVolume(double vol)
    if(normalized > maxv)
       normalized = maxv;
    return normalized;
+}
+
+double CalculateTargetDistance(const double entry_price)
+{
+   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double minDist = MinTargetPoints * pt;
+   double pctDist = entry_price * (TargetPercent / 100.0);
+   return MathMax(minDist, pctDist);
 }
 
 int OpenTrancheCount()
@@ -353,8 +362,6 @@ void RebuildTranchesFromPositions(const bool hedging)
    if(ptotal <= 0)
       return;
 
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
-
    for(int i = 0; i < ptotal; i++)
    {
       ulong ticket = PositionGetTicket(i);
@@ -376,7 +383,7 @@ void RebuildTranchesFromPositions(const bool hedging)
       t.time_open = (datetime)PositionGetInteger(POSITION_TIME);
       t.entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
       t.volume = PositionGetDouble(POSITION_VOLUME);
-      t.target_price = t.entry_price + TargetPoints * pt;  // Fixed with point multiplication
+      t.target_price = t.entry_price + CalculateTargetDistance(t.entry_price);
       t.closed = false;
 
       int sz = ArraySize(tranches);
@@ -391,15 +398,13 @@ void RebuildTranchesFromPositions(const bool hedging)
 
 bool AddTranche(const double entry_price, const double volume, const ulong ticket)
 {
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
-   
    Tranche t;
    t.seq = ++next_seq;
    t.ticket = ticket;
    t.time_open = TimeCurrent();
    t.entry_price = entry_price;
    t.volume = volume;
-   t.target_price = entry_price + TargetPoints * pt;  // Fixed with point multiplication
+   t.target_price = entry_price + CalculateTargetDistance(entry_price);
    t.closed = false;
 
    int sz = ArraySize(tranches);
