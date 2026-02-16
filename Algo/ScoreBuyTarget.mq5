@@ -17,7 +17,7 @@ input int Rsi1hBuyThreshold = 40;
 input int Rsi1hSellThreshold = 55;
 input int SumitSma3Period = 3;
 input int SumitSma201Period = 201;
-input int EntryScoreThreshold = -2; // score <= 30 (score < -1 in Python scale)
+input int EntryScoreThreshold = 30; // Direct score threshold; legacy negative values map as -2 => 30
 
 // MA201 Filter (uses existing SMA201 handle)
 input bool UseEma200Filter = true;       // Enable MA201 bullish filter
@@ -26,8 +26,7 @@ input int EmaSlopeBars = 5;               // Bars to check slope (current vs X b
 
 // Trading logic
 input double MinTargetPoints = 5.0;   // Minimum TP distance in points
-input double TargetPercent = 0.01;    // TP distance in percent of entry price
-input double StepPoints = 5.0;
+input double TargetPercent = 0.1;     // TP distance in percent of entry price
 input double LotSize = 0.01;
 input double LotStep = 0.01;
 input int MaxEntries = 0;        // 0 = unlimited
@@ -76,12 +75,18 @@ double NormalizeVolume(double vol)
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
    if(step <= 0.0)
       step = minv;
-   double normalized = MathFloor(vol / step) * step;
+
+   if(vol < minv)
+      vol = minv;
+
+   // Avoid floating precision traps (e.g. 0.07 / 0.01 becoming 6.999999...)
+   double normalized = minv + MathFloor((vol - minv + 1e-8) / step) * step;
    if(normalized < minv)
       normalized = minv;
    if(normalized > maxv)
       normalized = maxv;
-   return normalized;
+
+   return NormalizeDouble(normalized, 8);
 }
 
 double CalculateTargetDistance(const double entry_price)
@@ -90,6 +95,11 @@ double CalculateTargetDistance(const double entry_price)
    double minDist = MinTargetPoints * pt;
    double pctDist = entry_price * (TargetPercent / 100.0);
    return MathMax(minDist, pctDist);
+}
+
+double CalculateStepDistance(const double reference_price)
+{
+   return reference_price * (TargetPercent / 100.0);
 }
 
 int OpenTrancheCount()
@@ -461,12 +471,25 @@ bool TryOpenEntry(const double price, const double lot, const bool hedging)
    if(vol <= 0.0)
       return false;
 
+   if(MathAbs(vol - lot) > 1e-8)
+   {
+      PrintFormat("Lot normalized. reqLot=%.4f normLot=%.4f min=%.4f step=%.4f max=%.4f",
+                  lot, vol,
+                  SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
+                  SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
+                  SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+   }
+
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(Deviation);
 
    string comment = StringFormat("SB|lot=%.2f", vol);
    if(!trade.Buy(vol, _Symbol, 0, 0, 0, comment))
+   {
+      PrintFormat("Buy failed. reqLot=%.4f normLot=%.4f retcode=%d (%s)",
+                  lot, vol, trade.ResultRetcode(), trade.ResultRetcodeDescription());
       return false;
+   }
 
    double entry_price = trade.ResultPrice();
    if(entry_price <= 0.0)
@@ -509,6 +532,12 @@ int OnInit()
 
    if(UseEma200Filter)
       Print("MA201 filter enabled with slope check: ", CheckEmaSlope ? "Yes" : "No");
+
+   PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
+               _Symbol,
+               SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
+               SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
+               SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
 
    return(INIT_SUCCEEDED);
 }
@@ -561,7 +590,9 @@ void OnTick()
       return;
 
    int openCount = OpenTrancheCount();
-   int scoreTrigger = 50 + (EntryScoreThreshold * 10);
+   int scoreTrigger = EntryScoreThreshold;
+   if(EntryScoreThreshold < 0)
+      scoreTrigger = 50 + (EntryScoreThreshold * 10);
    bool scoreOk = (score <= scoreTrigger);
 
    if(openCount == 0)
@@ -571,8 +602,7 @@ void OnTick()
 
       if(last_entry_price_ref > 0.0)
       {
-         double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
-         if(MathAbs(bid - last_entry_price_ref) < StepPoints * pt)  // Fixed with point multiplication
+         if(MathAbs(bid - last_entry_price_ref) < CalculateStepDistance(last_entry_price_ref))
             return;
       }
 
@@ -586,8 +616,7 @@ void OnTick()
    if(!scoreOk)
       return;
 
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);  // Get point value
-   if(last_entry_price_open > 0.0 && bid <= (last_entry_price_open - StepPoints * pt))  // Fixed with point multiplication
+   if(last_entry_price_open > 0.0 && bid <= (last_entry_price_open - CalculateStepDistance(last_entry_price_open)))
    {
       double nextLot = last_entry_lot;
       if(nextLot <= 0.0)
