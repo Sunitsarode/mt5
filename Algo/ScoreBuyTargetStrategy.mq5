@@ -1,15 +1,14 @@
 //+------------------------------------------------------------------+
-//|                         ScoreBuy Strategy (EA) with EMA200       |
-// Based on SUMIT_RSI_Score.. Target 5points for XAU-USD
-// Added: EMA200 bullish filter with slope confirmation
+//|                         ScoreBuy Strategy (EA)                   |
+//| Uses external indicators: Sumit_RSI_Score_Indicator + supertrend |
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
-#property version   "1.01"
+#property version   "1.02"
 #property strict
 
 #include <Trade/Trade.mqh>
 
-// Inputs (indicator logic)
+// Inputs for Sumit_RSI_Score_Indicator
 input int Rsi1hPeriod = 51;
 input int SumitMaBuyThreshold = 30;
 input int SumitMaSellThreshold = 70;
@@ -17,19 +16,21 @@ input int Rsi1hBuyThreshold = 40;
 input int Rsi1hSellThreshold = 55;
 input int SumitSma3Period = 3;
 input int SumitSma201Period = 201;
-input int EntryScoreThreshold = 30; // Direct score threshold; legacy negative values map as -2 => 30
+input int SumitRsiPeriod = 7;
+input int EntryScoreThreshold = 30; // Score must be <= threshold
 
-// MA201 Filter (uses existing SMA201 handle)
-input bool UseEma200Filter = true;       // Enable MA201 bullish filter
-input bool CheckEmaSlope = true;          // Check if MA201 is sloping up
-input int EmaSlopeBars = 5;               // Bars to check slope (current vs X bars ago)
+// SuperTrend filter (1H timeframe)
+input int SupertrendAtrPeriod = 22;
+input double SupertrendMultiplier = 3.0;
+input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN;
+input bool SupertrendTakeWicksIntoAccount = true;
 
 // Trading logic
 input double MinTargetPoints = 5.0;   // Minimum TP distance in points
 input double TargetPercent = 0.1;     // TP distance in percent of entry price
 input double LotSize = 0.01;
 input double LotStep = 0.01;
-input int MaxEntries = 0;        // 0 = unlimited
+input int MaxEntries = 0;             // 0 = unlimited
 
 // Execution
 input ulong MagicNumber = 20260212;
@@ -41,7 +42,7 @@ CTrade trade;
 struct Tranche
 {
    int      seq;
-   ulong    ticket;       // position ticket for hedging (0 for netting)
+   ulong    ticket;       // Position ticket for hedging (0 for netting)
    datetime time_open;
    double   entry_price;
    double   volume;
@@ -53,15 +54,14 @@ Tranche tranches[];
 int next_seq = 0;
 double last_entry_price_open = 0.0;
 double last_entry_lot = 0.0;
-double last_entry_price_ref = 0.0; // last entry price even after close
+double last_entry_price_ref = 0.0;
 datetime last_bar_time = 0;
 
-int rsiHandle = INVALID_HANDLE;
-int ma3Handle = INVALID_HANDLE;
-int ma201Handle = INVALID_HANDLE;
+int sumitScoreHandle = INVALID_HANDLE;
+int supertrendH1Handle = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
-//| Utility                                                         |
+//| Utility                                                          |
 //+------------------------------------------------------------------+
 bool IsHedging()
 {
@@ -79,7 +79,7 @@ double NormalizeVolume(double vol)
    if(vol < minv)
       vol = minv;
 
-   // Avoid floating precision traps (e.g. 0.07 / 0.01 becoming 6.999999...)
+   // Avoid floating precision traps (e.g. 0.07 / 0.01 => 6.999999...)
    double normalized = minv + MathFloor((vol - minv + 1e-8) / step) * step;
    if(normalized < minv)
       normalized = minv;
@@ -133,180 +133,39 @@ void UpdateLastEntryFromOpen()
    }
 }
 
-//+------------------------------------------------------------------+
-//| MA201 Bullish Confirmation                                      |
-//+------------------------------------------------------------------+
-bool IsBullishConfirmed()
+bool GetScoreValue(const int shift, double &score)
 {
-   if(!UseEma200Filter)
-      return true;  // Filter disabled, always allow trading
-   
-   // Get close prices
-   double close[];
-   ArraySetAsSeries(close, true);
-   if(CopyClose(_Symbol, PERIOD_CURRENT, 0, 10, close) <= 0)
-   {
-      Print("Failed to get close prices for MA201 filter");
-      return false;
-   }
-   
-   // Get MA201 values
-   double ma201[];
-   ArraySetAsSeries(ma201, true);
-   int copyBars = MathMax(10, EmaSlopeBars + 5);
-   if(CopyBuffer(ma201Handle, 0, 0, copyBars, ma201) <= 0)
-   {
-      Print("Failed to get MA201 values");
-      return false;
-   }
-   
-   // Check 1: Current close price must be ABOVE MA201
-   if(close[1] <= ma201[1])  // Using bar 1 (completed bar)
-   {
-      return false;  // Price not above MA201
-   }
-   
-   // Check 2: MA201 must be sloping UP (optional)
-   if(CheckEmaSlope)
-   {
-      if(EmaSlopeBars < 2)
-      {
-         Print("EmaSlopeBars must be >= 2 for slope check");
-         return false;
-      }
-      
-      double ma_current = ma201[1];
-      double ma_past = ma201[EmaSlopeBars];
-      
-      if(ma_current <= ma_past)
-      {
-         return false;  // MA201 is not sloping up
-      }
-   }
-   
-   return true;  // All bullish conditions met
-}
+   double scoreBuffer[];
+   ArraySetAsSeries(scoreBuffer, true);
 
-//+------------------------------------------------------------------+
-//| Indicator math                                                  |
-//+------------------------------------------------------------------+
-bool CalcRsiAt(const double &arr[], const int index, const int period, double &out)
-{
-   int size = ArraySize(arr);
-   if(index + period >= size)
+   int copied = CopyBuffer(sumitScoreHandle, 4, shift, 1, scoreBuffer);
+   if(copied <= 0)
       return false;
 
-   double gains = 0.0, losses = 0.0;
-   for(int j = 1; j <= period; j++)
-   {
-      double a = arr[index + j - 1];
-      double b = arr[index + j];
-      if(a == EMPTY_VALUE || b == EMPTY_VALUE)
-         return false;
-      double change = a - b;
-      if(change > 0)
-         gains += change;
-      else
-         losses -= change;
-   }
+   if(scoreBuffer[0] == EMPTY_VALUE)
+      return false;
 
-   if(losses == 0.0)
-      out = 100.0;
-   else
-      out = 100.0 - (100.0 / (1.0 + (gains / losses)));
-
+   score = scoreBuffer[0];
    return true;
 }
 
-bool CalcSmaAt(const double &arr[], const int index, const int period, double &out)
+bool IsSuperTrendBullishH1(const int shift)
 {
-   int size = ArraySize(arr);
-   if(index + period > size)
+   double directionBuffer[];
+   ArraySetAsSeries(directionBuffer, true);
+
+   int copied = CopyBuffer(supertrendH1Handle, 2, shift, 1, directionBuffer);
+   if(copied <= 0)
       return false;
 
-   double sum = 0.0;
-   for(int j = 0; j < period; j++)
-   {
-      double v = arr[index + j];
-      if(v == EMPTY_VALUE)
-         return false;
-      sum += v;
-   }
-
-   out = sum / period;
-   return true;
-}
-
-bool CalculateScore(const int shift, int &score, double &sumitRsi, double &signalMa3, double &signalMa11, double &rsiVal)
-{
-   int bars = Bars(_Symbol, PERIOD_CURRENT);
-   int minBars = MathMax(250, SumitSma201Period + 20);
-   if(bars < minBars + shift)
+   if(directionBuffer[0] == EMPTY_VALUE)
       return false;
 
-   int count = MathMin(bars, MathMax(300, minBars));
-
-   double rsi[];
-   double ma3[];
-   double ma201[];
-   ArraySetAsSeries(rsi, true);
-   ArraySetAsSeries(ma3, true);
-   ArraySetAsSeries(ma201, true);
-
-   if(CopyBuffer(rsiHandle, 0, 0, count, rsi) <= 0)
-      return false;
-   if(CopyBuffer(ma3Handle, 0, 0, count, ma3) <= 0)
-      return false;
-   if(CopyBuffer(ma201Handle, 0, 0, count, ma201) <= 0)
-      return false;
-
-   double momentum[];
-   double rsiMomentum[];
-   ArrayResize(momentum, count);
-   ArrayResize(rsiMomentum, count);
-   ArraySetAsSeries(momentum, true);
-   ArraySetAsSeries(rsiMomentum, true);
-
-   for(int i = count - 1; i >= 0; i--)
-      momentum[i] = ma3[i] - ma201[i];
-
-   for(int i = count - 1; i >= 0; i--)
-   {
-      double r;
-      if(CalcRsiAt(momentum, i, 7, r))
-         rsiMomentum[i] = r;
-      else
-         rsiMomentum[i] = EMPTY_VALUE;
-   }
-
-   sumitRsi = rsiMomentum[shift];
-   if(sumitRsi == EMPTY_VALUE)
-      return false;
-   if(!CalcSmaAt(rsiMomentum, shift, 3, signalMa3))
-      return false;
-   if(!CalcSmaAt(rsiMomentum, shift, 11, signalMa11))
-      return false;
-
-   rsiVal = rsi[shift];
-   if(rsiVal == EMPTY_VALUE)
-      return false;
-
-   score = 50;
-   if(signalMa3 > SumitMaSellThreshold) score += 10;
-   if(signalMa11 > SumitMaSellThreshold) score += 10;
-   if(sumitRsi > SumitMaSellThreshold) score += 10;
-   if(rsiVal > Rsi1hSellThreshold) score += 10;
-
-   if(signalMa3 < SumitMaBuyThreshold) score -= 10;
-   if(signalMa11 < SumitMaBuyThreshold) score -= 10;
-   if(sumitRsi < SumitMaBuyThreshold) score -= 10;
-   if(rsiVal < Rsi1hBuyThreshold) score -= 10;
-
-   return true;
+   return (directionBuffer[0] > 0.0);
 }
 
 //+------------------------------------------------------------------+
-//| Tranche management                                              |
+//| Tranche management                                               |
 //+------------------------------------------------------------------+
 void SyncTranches(const bool hedging)
 {
@@ -329,7 +188,6 @@ void SyncTranches(const bool hedging)
    }
    else
    {
-      // If no position for this symbol/magic, clear all tranches
       bool hasPosition = false;
       int ptotal = PositionsTotal();
       for(int i = 0; i < ptotal; i++)
@@ -346,9 +204,11 @@ void SyncTranches(const bool hedging)
             continue;
          if((int)PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY)
             continue;
+
          hasPosition = true;
          break;
       }
+
       if(!hasPosition)
       {
          for(int i = 0; i < total; i++)
@@ -375,10 +235,10 @@ void RebuildTranchesFromPositions(const bool hedging)
    for(int i = 0; i < ptotal; i++)
    {
       ulong ticket = PositionGetTicket(i);
-         if(ticket == 0)
-            continue;
-         if(!PositionSelectByTicket(ticket))
-            continue;
+      if(ticket == 0)
+         continue;
+      if(!PositionSelectByTicket(ticket))
+         continue;
 
       if(PositionGetString(POSITION_SYMBOL) != _Symbol)
          continue;
@@ -463,7 +323,7 @@ void CheckTargets(const bool hedging, const double current_price)
 }
 
 //+------------------------------------------------------------------+
-//| Trading                                                         |
+//| Trading                                                          |
 //+------------------------------------------------------------------+
 bool TryOpenEntry(const double price, const double lot, const bool hedging)
 {
@@ -508,30 +368,48 @@ bool TryOpenEntry(const double price, const double lot, const bool hedging)
 }
 
 //+------------------------------------------------------------------+
-//| Init / Deinit                                                   |
+//| Init / Deinit                                                    |
 //+------------------------------------------------------------------+
 int OnInit()
 {
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(Deviation);
 
-   rsiHandle = iRSI(_Symbol, PERIOD_CURRENT, Rsi1hPeriod, PRICE_CLOSE);
-   if(rsiHandle == INVALID_HANDLE)
+   sumitScoreHandle = iCustom(
+      _Symbol,
+      PERIOD_CURRENT,
+      "Sumit_RSI_Score_Indicator",
+      Rsi1hPeriod,
+      SumitMaBuyThreshold,
+      SumitMaSellThreshold,
+      Rsi1hBuyThreshold,
+      Rsi1hSellThreshold,
+      SumitSma3Period,
+      SumitSma201Period,
+      SumitRsiPeriod
+   );
+
+   if(sumitScoreHandle == INVALID_HANDLE)
    {
-      Print("Failed to create RSI handle");
+      PrintFormat("Failed to create Sumit score indicator handle. err=%d", GetLastError());
       return(INIT_FAILED);
    }
 
-   ma3Handle = iMA(_Symbol, PERIOD_CURRENT, SumitSma3Period, 0, MODE_SMA, PRICE_TYPICAL);
-   ma201Handle = iMA(_Symbol, PERIOD_CURRENT, SumitSma201Period, 0, MODE_SMA, PRICE_TYPICAL);
-   if(ma3Handle == INVALID_HANDLE || ma201Handle == INVALID_HANDLE)
+   supertrendH1Handle = iCustom(
+      _Symbol,
+      PERIOD_H1,
+      "supertrend",
+      SupertrendAtrPeriod,
+      SupertrendMultiplier,
+      SupertrendSourcePrice,
+      SupertrendTakeWicksIntoAccount
+   );
+
+   if(supertrendH1Handle == INVALID_HANDLE)
    {
-      Print("Failed to create SMA handles");
+      PrintFormat("Failed to create SuperTrend H1 handle. err=%d", GetLastError());
       return(INIT_FAILED);
    }
-
-   if(UseEma200Filter)
-      Print("MA201 filter enabled with slope check: ", CheckEmaSlope ? "Yes" : "No");
 
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol,
@@ -539,21 +417,21 @@ int OnInit()
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
                SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
 
+   Print("Strategy uses external score + H1 SuperTrend bullish filter.");
+
    return(INIT_SUCCEEDED);
 }
 
 void OnDeinit(const int reason)
 {
-   if(rsiHandle != INVALID_HANDLE)
-      IndicatorRelease(rsiHandle);
-   if(ma3Handle != INVALID_HANDLE)
-      IndicatorRelease(ma3Handle);
-   if(ma201Handle != INVALID_HANDLE)
-      IndicatorRelease(ma201Handle);
+   if(sumitScoreHandle != INVALID_HANDLE)
+      IndicatorRelease(sumitScoreHandle);
+   if(supertrendH1Handle != INVALID_HANDLE)
+      IndicatorRelease(supertrendH1Handle);
 }
 
 //+------------------------------------------------------------------+
-//| Tick                                                            |
+//| Tick                                                             |
 //+------------------------------------------------------------------+
 void OnTick()
 {
@@ -569,13 +447,6 @@ void OnTick()
 
    CheckTargets(hedging, bid);
 
-   // *** CHECK BULLISH CONFIRMATION FIRST ***
-   if(!IsBullishConfirmed())
-   {
-      // Price is below EMA200 or EMA200 is not sloping up - no new entries
-      return;
-   }
-
    if(UseNewBar)
    {
       datetime bar_time = iTime(_Symbol, PERIOD_CURRENT, 0);
@@ -584,15 +455,19 @@ void OnTick()
       last_bar_time = bar_time;
    }
 
-   int score;
-   double sumitRsi, signalMa3, signalMa11, rsiVal;
-   if(!CalculateScore(1, score, sumitRsi, signalMa3, signalMa11, rsiVal))
+   // Buy gating condition: SuperTrend on H1 must be bullish.
+   if(!IsSuperTrendBullishH1(1))
+      return;
+
+   double score = EMPTY_VALUE;
+   if(!GetScoreValue(1, score))
       return;
 
    int openCount = OpenTrancheCount();
    int scoreTrigger = EntryScoreThreshold;
    if(EntryScoreThreshold < 0)
       scoreTrigger = 50 + (EntryScoreThreshold * 10);
+
    bool scoreOk = (score <= scoreTrigger);
 
    if(openCount == 0)
