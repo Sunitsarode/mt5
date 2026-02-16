@@ -3,7 +3,7 @@
 //| Uses external indicators: Sumit_RSI_Score_Indicator + supertrend |
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
-#property version   "1.02"
+#property version   "1.03"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -60,6 +60,12 @@ datetime last_bar_time = 0;
 int sumitScoreHandle = INVALID_HANDLE;
 int supertrendH1Handle = INVALID_HANDLE;
 
+// Cached symbol properties (faster than repeated SymbolInfoDouble calls)
+double g_vol_min = 0.0;
+double g_vol_max = 0.0;
+double g_vol_step = 0.0;
+double g_point = 0.0;
+
 //+------------------------------------------------------------------+
 //| Utility                                                          |
 //+------------------------------------------------------------------+
@@ -70,9 +76,10 @@ bool IsHedging()
 
 double NormalizeVolume(double vol)
 {
-   double minv = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxv = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   double minv = g_vol_min;
+   double maxv = g_vol_max;
+   double step = g_vol_step;
+
    if(step <= 0.0)
       step = minv;
 
@@ -91,8 +98,7 @@ double NormalizeVolume(double vol)
 
 double CalculateTargetDistance(const double entry_price)
 {
-   double pt = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
-   double minDist = MinTargetPoints * pt;
+   double minDist = MinTargetPoints * g_point;
    double pctDist = entry_price * (TargetPercent / 100.0);
    return MathMax(minDist, pctDist);
 }
@@ -135,33 +141,35 @@ void UpdateLastEntryFromOpen()
 
 bool GetScoreValue(const int shift, double &score)
 {
-   double scoreBuffer[];
-   ArraySetAsSeries(scoreBuffer, true);
-
-   int copied = CopyBuffer(sumitScoreHandle, 4, shift, 1, scoreBuffer);
-   if(copied <= 0)
+   if(sumitScoreHandle == INVALID_HANDLE)
       return false;
 
-   if(scoreBuffer[0] == EMPTY_VALUE)
+   double score_value[1];
+   int copied = CopyBuffer(sumitScoreHandle, 4, shift, 1, score_value);
+   if(copied != 1)
       return false;
 
-   score = scoreBuffer[0];
+   if(score_value[0] == EMPTY_VALUE)
+      return false;
+
+   score = score_value[0];
    return true;
 }
 
 bool IsSuperTrendBullishH1(const int shift)
 {
-   double directionBuffer[];
-   ArraySetAsSeries(directionBuffer, true);
-
-   int copied = CopyBuffer(supertrendH1Handle, 2, shift, 1, directionBuffer);
-   if(copied <= 0)
+   if(supertrendH1Handle == INVALID_HANDLE)
       return false;
 
-   if(directionBuffer[0] == EMPTY_VALUE)
+   double direction_value[1];
+   int copied = CopyBuffer(supertrendH1Handle, 2, shift, 1, direction_value);
+   if(copied != 1)
       return false;
 
-   return (directionBuffer[0] > 0.0);
+   if(direction_value[0] == EMPTY_VALUE)
+      return false;
+
+   return (direction_value[0] > 0.0);
 }
 
 //+------------------------------------------------------------------+
@@ -334,10 +342,7 @@ bool TryOpenEntry(const double price, const double lot, const bool hedging)
    if(MathAbs(vol - lot) > 1e-8)
    {
       PrintFormat("Lot normalized. reqLot=%.4f normLot=%.4f min=%.4f step=%.4f max=%.4f",
-                  lot, vol,
-                  SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
-                  SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
-                  SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+                  lot, vol, g_vol_min, g_vol_step, g_vol_max);
    }
 
    trade.SetExpertMagicNumber(MagicNumber);
@@ -374,6 +379,17 @@ int OnInit()
 {
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetDeviationInPoints(Deviation);
+
+   g_vol_min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   g_vol_max = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   g_vol_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   g_point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+
+   if(g_vol_min <= 0.0 || g_vol_max <= 0.0 || g_point <= 0.0)
+   {
+      Print("Failed to read symbol properties.");
+      return(INIT_FAILED);
+   }
 
    sumitScoreHandle = iCustom(
       _Symbol,
@@ -412,10 +428,7 @@ int OnInit()
    }
 
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
-               _Symbol,
-               SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN),
-               SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP),
-               SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX));
+               _Symbol, g_vol_min, g_vol_step, g_vol_max);
 
    Print("Strategy uses external score + H1 SuperTrend bullish filter.");
 

@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//|                                   Sumit_RSI_Score_Trend.mq5        |
+//|                                   Sumit_RSI_Score_Trend.mq5      |
 //+------------------------------------------------------------------+
 #property copyright "Strategy Indicators"
-#property version   "1.10"
+#property version   "1.20"
 #property indicator_separate_window
-#property indicator_buffers 5
+#property indicator_buffers 7
 #property indicator_plots   5
 
 #include <MovingAverages.mqh>
@@ -65,20 +65,26 @@ double SignalMa11Buffer[];
 double Rsi1hBuffer[];
 double ScoreBuffer[];
 
+// Internal calculation buffers
+double AvgGainBuffer[];
+double AvgLossBuffer[];
+double WorkRsi[];
+double WorkMa3[];
+double WorkMa201[];
+double WorkMomentum[];
+
 // Handles
 int rsiHandle = INVALID_HANDLE;
 int ma3Handle = INVALID_HANDLE;
 int ma201Handle = INVALID_HANDLE;
 
 //+------------------------------------------------------------------+
-//| Wilder RSI on array                                              |
+//| Seed Wilder averages at the first calculable bar                 |
 //+------------------------------------------------------------------+
-void CalcRsiWilderBuffer(const double &src[], const int rates_total, const int period, double &dst[])
+bool SeedWilderAverages(const double &src[], const int period, double &avg_gain, double &avg_loss)
 {
-   ArrayInitialize(dst, EMPTY_VALUE);
-
-   if(period <= 0 || rates_total <= period)
-      return;
+   if(ArraySize(src) <= period)
+      return false;
 
    double gain_sum = 0.0;
    double loss_sum = 0.0;
@@ -86,7 +92,7 @@ void CalcRsiWilderBuffer(const double &src[], const int rates_total, const int p
    for(int i = 1; i <= period; i++)
    {
       if(src[i] == EMPTY_VALUE || src[i - 1] == EMPTY_VALUE)
-         return;
+         return false;
 
       double change = src[i] - src[i - 1];
       if(change > 0.0)
@@ -95,33 +101,99 @@ void CalcRsiWilderBuffer(const double &src[], const int rates_total, const int p
          loss_sum -= change;
    }
 
-   double avg_gain = gain_sum / period;
-   double avg_loss = loss_sum / period;
+   avg_gain = gain_sum / period;
+   avg_loss = loss_sum / period;
+   return true;
+}
 
-   if(avg_loss == 0.0)
-      dst[period] = 100.0;
-   else
-      dst[period] = 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)));
+//+------------------------------------------------------------------+
+//| Incremental Wilder RSI on array                                  |
+//+------------------------------------------------------------------+
+void UpdateRsiWilderBuffer(const int rates_total, const int prev_calculated, const int period)
+{
+   if(period <= 0 || rates_total <= period)
+      return;
 
-   for(int i = period + 1; i < rates_total; i++)
+   int start = (prev_calculated > 0) ? (prev_calculated - 1) : 0;
+   if(start < 0)
+      start = 0;
+
+   if(start <= period)
    {
-      if(src[i] == EMPTY_VALUE || src[i - 1] == EMPTY_VALUE)
+      for(int i = 0; i < MathMin(period, rates_total); i++)
       {
-         dst[i] = EMPTY_VALUE;
+         SumitRsiBuffer[i] = EMPTY_VALUE;
+         AvgGainBuffer[i] = EMPTY_VALUE;
+         AvgLossBuffer[i] = EMPTY_VALUE;
+      }
+
+      double avg_gain = 0.0;
+      double avg_loss = 0.0;
+      if(!SeedWilderAverages(WorkMomentum, period, avg_gain, avg_loss))
+         return;
+
+      AvgGainBuffer[period] = avg_gain;
+      AvgLossBuffer[period] = avg_loss;
+      SumitRsiBuffer[period] = (avg_loss == 0.0)
+                               ? 100.0
+                               : 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)));
+
+      start = period + 1;
+   }
+   else
+   {
+      // If prior state is unavailable (rare on history reset), rebuild from seed.
+      if(AvgGainBuffer[start - 1] == EMPTY_VALUE || AvgLossBuffer[start - 1] == EMPTY_VALUE)
+      {
+         double avg_gain = 0.0;
+         double avg_loss = 0.0;
+         if(!SeedWilderAverages(WorkMomentum, period, avg_gain, avg_loss))
+            return;
+
+         AvgGainBuffer[period] = avg_gain;
+         AvgLossBuffer[period] = avg_loss;
+         SumitRsiBuffer[period] = (avg_loss == 0.0)
+                                  ? 100.0
+                                  : 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)));
+
+         if(start < period + 1)
+            start = period + 1;
+      }
+   }
+
+   for(int i = start; i < rates_total; i++)
+   {
+      if(WorkMomentum[i] == EMPTY_VALUE || WorkMomentum[i - 1] == EMPTY_VALUE)
+      {
+         SumitRsiBuffer[i] = EMPTY_VALUE;
+         AvgGainBuffer[i] = EMPTY_VALUE;
+         AvgLossBuffer[i] = EMPTY_VALUE;
          continue;
       }
 
-      double change = src[i] - src[i - 1];
+      double prev_avg_gain = AvgGainBuffer[i - 1];
+      double prev_avg_loss = AvgLossBuffer[i - 1];
+      if(prev_avg_gain == EMPTY_VALUE || prev_avg_loss == EMPTY_VALUE)
+      {
+         SumitRsiBuffer[i] = EMPTY_VALUE;
+         AvgGainBuffer[i] = EMPTY_VALUE;
+         AvgLossBuffer[i] = EMPTY_VALUE;
+         continue;
+      }
+
+      double change = WorkMomentum[i] - WorkMomentum[i - 1];
       double gain = (change > 0.0) ? change : 0.0;
       double loss = (change < 0.0) ? -change : 0.0;
 
-      avg_gain = ((avg_gain * (period - 1)) + gain) / period;
-      avg_loss = ((avg_loss * (period - 1)) + loss) / period;
+      double avg_gain = ((prev_avg_gain * (period - 1)) + gain) / period;
+      double avg_loss = ((prev_avg_loss * (period - 1)) + loss) / period;
 
-      if(avg_loss == 0.0)
-         dst[i] = 100.0;
-      else
-         dst[i] = 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)));
+      AvgGainBuffer[i] = avg_gain;
+      AvgLossBuffer[i] = avg_loss;
+
+      SumitRsiBuffer[i] = (avg_loss == 0.0)
+                          ? 100.0
+                          : 100.0 - (100.0 / (1.0 + (avg_gain / avg_loss)));
    }
 }
 
@@ -135,13 +207,17 @@ int OnInit()
    SetIndexBuffer(2, SignalMa11Buffer, INDICATOR_DATA);
    SetIndexBuffer(3, Rsi1hBuffer, INDICATOR_DATA);
    SetIndexBuffer(4, ScoreBuffer, INDICATOR_DATA);
+   SetIndexBuffer(5, AvgGainBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(6, AvgLossBuffer, INDICATOR_CALCULATIONS);
 
-   // Use non-series indexing in all calculations (oldest -> newest).
+   // Use non-series indexing in calculations (oldest -> newest).
    ArraySetAsSeries(SumitRsiBuffer, false);
    ArraySetAsSeries(SignalMa3Buffer, false);
    ArraySetAsSeries(SignalMa11Buffer, false);
    ArraySetAsSeries(Rsi1hBuffer, false);
    ArraySetAsSeries(ScoreBuffer, false);
+   ArraySetAsSeries(AvgGainBuffer, false);
+   ArraySetAsSeries(AvgLossBuffer, false);
 
    int sumit_begin = SumitSma201Period + SumitRsiPeriod;
    int signal3_begin = sumit_begin + 3 - 1;
@@ -192,50 +268,57 @@ int OnCalculate(const int rates_total,
    if(rates_total < min_bars)
       return(0);
 
-   double rsi[];
-   double ma3[];
-   double ma201[];
-   double momentum[];
-
-   ArrayResize(rsi, rates_total);
-   ArrayResize(ma3, rates_total);
-   ArrayResize(ma201, rates_total);
-   ArrayResize(momentum, rates_total);
-
-   ArraySetAsSeries(rsi, false);
-   ArraySetAsSeries(ma3, false);
-   ArraySetAsSeries(ma201, false);
-   ArraySetAsSeries(momentum, false);
-
-   int copied_rsi = CopyBuffer(rsiHandle, 0, 0, rates_total, rsi);
-   int copied_ma3 = CopyBuffer(ma3Handle, 0, 0, rates_total, ma3);
-   int copied_ma201 = CopyBuffer(ma201Handle, 0, 0, rates_total, ma201);
-
-   if(copied_rsi != rates_total || copied_ma3 != rates_total || copied_ma201 != rates_total)
-      return(prev_calculated);
-
-   for(int i = 0; i < rates_total; i++)
-   {
-      Rsi1hBuffer[i] = rsi[i];
-      momentum[i] = ma3[i] - ma201[i];
-   }
-
-   CalcRsiWilderBuffer(momentum, rates_total, SumitRsiPeriod, SumitRsiBuffer);
-
-   int ma3_state = (prev_calculated > 0) ? prev_calculated : 0;
-   int ma11_state = (prev_calculated > 0) ? prev_calculated : 0;
-   SimpleMAOnBuffer(rates_total, ma3_state, SumitRsiPeriod, 3, SumitRsiBuffer, SignalMa3Buffer);
-   SimpleMAOnBuffer(rates_total, ma11_state, SumitRsiPeriod, 11, SumitRsiBuffer, SignalMa11Buffer);
-
-   int score_begin = SumitRsiPeriod + 11 - 1;
    int start = (prev_calculated > 0) ? (prev_calculated - 1) : 0;
    if(start < 0)
       start = 0;
 
-   for(int i = start; i < rates_total && !IsStopped(); i++)
+   ArrayResize(WorkRsi, rates_total);
+   ArrayResize(WorkMa3, rates_total);
+   ArrayResize(WorkMa201, rates_total);
+   ArrayResize(WorkMomentum, rates_total);
+
+   ArraySetAsSeries(WorkRsi, false);
+   ArraySetAsSeries(WorkMa3, false);
+   ArraySetAsSeries(WorkMa201, false);
+   ArraySetAsSeries(WorkMomentum, false);
+
+   int copied_rsi = CopyBuffer(rsiHandle, 0, 0, rates_total, WorkRsi);
+   int copied_ma3 = CopyBuffer(ma3Handle, 0, 0, rates_total, WorkMa3);
+   int copied_ma201 = CopyBuffer(ma201Handle, 0, 0, rates_total, WorkMa201);
+
+   if(copied_rsi != rates_total || copied_ma3 != rates_total || copied_ma201 != rates_total)
+      return(prev_calculated);
+
+   if(prev_calculated == 0)
    {
-      if(i < score_begin ||
-         SumitRsiBuffer[i] == EMPTY_VALUE ||
+      for(int i = 0; i < rates_total; i++)
+      {
+         SumitRsiBuffer[i] = EMPTY_VALUE;
+         SignalMa3Buffer[i] = EMPTY_VALUE;
+         SignalMa11Buffer[i] = EMPTY_VALUE;
+         ScoreBuffer[i] = EMPTY_VALUE;
+         AvgGainBuffer[i] = EMPTY_VALUE;
+         AvgLossBuffer[i] = EMPTY_VALUE;
+      }
+   }
+
+   for(int i = start; i < rates_total; i++)
+   {
+      Rsi1hBuffer[i] = WorkRsi[i];
+      WorkMomentum[i] = WorkMa3[i] - WorkMa201[i];
+   }
+
+   UpdateRsiWilderBuffer(rates_total, prev_calculated, SumitRsiPeriod);
+
+   SimpleMAOnBuffer(rates_total, prev_calculated, SumitRsiPeriod, 3, SumitRsiBuffer, SignalMa3Buffer);
+   SimpleMAOnBuffer(rates_total, prev_calculated, SumitRsiPeriod, 11, SumitRsiBuffer, SignalMa11Buffer);
+
+   int score_begin = SumitRsiPeriod + 11 - 1;
+   int score_start = MathMax(start, score_begin);
+
+   for(int i = score_start; i < rates_total && !IsStopped(); i++)
+   {
+      if(SumitRsiBuffer[i] == EMPTY_VALUE ||
          SignalMa3Buffer[i] == EMPTY_VALUE ||
          SignalMa11Buffer[i] == EMPTY_VALUE ||
          Rsi1hBuffer[i] == EMPTY_VALUE)
