@@ -20,20 +20,21 @@ input int SumitRsiPeriod = 7;
 input int EntryScoreThreshold = 30; // Score must be <= threshold
 
 // SuperTrend filter (1H timeframe)
+input bool UseSuperTrend = false;
 input int SupertrendAtrPeriod = 22;
 input double SupertrendMultiplier = 3.0;
 input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN;
 input bool SupertrendTakeWicksIntoAccount = true;
 
 // Trading logic
-input double MinTargetPoints = 5.0;   // Minimum TP distance in points
+input double MinTargetPoints = 10.0;   // Minimum TP distance in points
 input double TargetPercent = 0.1;     // TP distance in percent of entry price
-input double LotSize = 0.01;
-input double LotStep = 0.01;
+input double LotSize = 0.1;
+input double LotStep = 0.1;
 input int MaxEntries = 0;             // 0 = unlimited
 
 // Execution
-input ulong MagicNumber = 20260212;
+input ulong MagicNumber = 20260217;
 input int Deviation = 30;
 input bool UseNewBar = true;
 
@@ -240,6 +241,8 @@ void RebuildTranchesFromPositions(const bool hedging)
    if(ptotal <= 0)
       return;
 
+   // First pass: Count valid positions to resize once
+   int valid_count = 0;
    for(int i = 0; i < ptotal; i++)
    {
       ulong ticket = PositionGetTicket(i);
@@ -255,6 +258,24 @@ void RebuildTranchesFromPositions(const bool hedging)
       if((int)PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY)
          continue;
 
+      valid_count++;
+   }
+
+   if(valid_count == 0)
+      return;
+
+   ArrayResize(tranches, valid_count);
+   int idx = 0;
+
+   // Second pass: Fill data
+   for(int i = 0; i < ptotal; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      if((int)PositionGetInteger(POSITION_TYPE) != POSITION_TYPE_BUY) continue;
+
       Tranche t;
       t.seq = ++next_seq;
       t.ticket = hedging ? (ulong)PositionGetInteger(POSITION_TICKET) : 0;
@@ -264,9 +285,8 @@ void RebuildTranchesFromPositions(const bool hedging)
       t.target_price = t.entry_price + CalculateTargetDistance(t.entry_price);
       t.closed = false;
 
-      int sz = ArraySize(tranches);
-      ArrayResize(tranches, sz + 1);
-      tranches[sz] = t;
+      if(idx < valid_count)
+         tranches[idx++] = t;
    }
 
    UpdateLastEntryFromOpen();
@@ -411,20 +431,23 @@ int OnInit()
       return(INIT_FAILED);
    }
 
-   supertrendH1Handle = iCustom(
-      _Symbol,
-      PERIOD_H1,
-      "supertrend",
-      SupertrendAtrPeriod,
-      SupertrendMultiplier,
-      SupertrendSourcePrice,
-      SupertrendTakeWicksIntoAccount
-   );
-
-   if(supertrendH1Handle == INVALID_HANDLE)
+   if(UseSuperTrend)
    {
-      PrintFormat("Failed to create SuperTrend H1 handle. err=%d", GetLastError());
-      return(INIT_FAILED);
+      supertrendH1Handle = iCustom(
+         _Symbol,
+         PERIOD_H1,
+         "supertrend",
+         SupertrendAtrPeriod,
+         SupertrendMultiplier,
+         SupertrendSourcePrice,
+         SupertrendTakeWicksIntoAccount
+      );
+
+      if(supertrendH1Handle == INVALID_HANDLE)
+      {
+         PrintFormat("Failed to create SuperTrend H1 handle. err=%d", GetLastError());
+         return(INIT_FAILED);
+      }
    }
 
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
@@ -469,7 +492,7 @@ void OnTick()
    }
 
    // Buy gating condition: SuperTrend on H1 must be bullish.
-   if(!IsSuperTrendBullishH1(1))
+   if(UseSuperTrend && !IsSuperTrendBullishH1(1))
       return;
 
    double score = EMPTY_VALUE;

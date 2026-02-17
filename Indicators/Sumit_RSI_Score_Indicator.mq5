@@ -4,7 +4,7 @@
 #property copyright "Strategy Indicators"
 #property version   "1.20"
 #property indicator_separate_window
-#property indicator_buffers 7
+#property indicator_buffers 11
 #property indicator_plots   5
 
 #include <MovingAverages.mqh>
@@ -209,6 +209,10 @@ int OnInit()
    SetIndexBuffer(4, ScoreBuffer, INDICATOR_DATA);
    SetIndexBuffer(5, AvgGainBuffer, INDICATOR_CALCULATIONS);
    SetIndexBuffer(6, AvgLossBuffer, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(7, WorkRsi, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(8, WorkMa3, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(9, WorkMa201, INDICATOR_CALCULATIONS);
+   SetIndexBuffer(10, WorkMomentum, INDICATOR_CALCULATIONS);
 
    // Use non-series indexing in calculations (oldest -> newest).
    ArraySetAsSeries(SumitRsiBuffer, false);
@@ -218,6 +222,10 @@ int OnInit()
    ArraySetAsSeries(ScoreBuffer, false);
    ArraySetAsSeries(AvgGainBuffer, false);
    ArraySetAsSeries(AvgLossBuffer, false);
+   ArraySetAsSeries(WorkRsi, false);
+   ArraySetAsSeries(WorkMa3, false);
+   ArraySetAsSeries(WorkMa201, false);
+   ArraySetAsSeries(WorkMomentum, false);
 
    int sumit_begin = SumitSma201Period + SumitRsiPeriod;
    int signal3_begin = sumit_begin + 3 - 1;
@@ -272,22 +280,23 @@ int OnCalculate(const int rates_total,
    if(start < 0)
       start = 0;
 
-   ArrayResize(WorkRsi, rates_total);
-   ArrayResize(WorkMa3, rates_total);
-   ArrayResize(WorkMa201, rates_total);
-   ArrayResize(WorkMomentum, rates_total);
-
-   ArraySetAsSeries(WorkRsi, false);
-   ArraySetAsSeries(WorkMa3, false);
-   ArraySetAsSeries(WorkMa201, false);
-   ArraySetAsSeries(WorkMomentum, false);
-
-   int copied_rsi = CopyBuffer(rsiHandle, 0, 0, rates_total, WorkRsi);
-   int copied_ma3 = CopyBuffer(ma3Handle, 0, 0, rates_total, WorkMa3);
-   int copied_ma201 = CopyBuffer(ma201Handle, 0, 0, rates_total, WorkMa201);
-
-   if(copied_rsi != rates_total || copied_ma3 != rates_total || copied_ma201 != rates_total)
-      return(prev_calculated);
+   // Incremental copy logic
+   int to_copy = rates_total - prev_calculated;
+   if(to_copy > 0)
+   {
+      if(prev_calculated > 0) to_copy++; // Overlap one bar for safety
+      
+      double tempBuffer[];
+      // Copy RSI
+      if(CopyBuffer(rsiHandle, 0, 0, to_copy, tempBuffer) == to_copy)
+         ArrayCopy(WorkRsi, tempBuffer, rates_total - to_copy, 0, to_copy);
+      // Copy MA3
+      if(CopyBuffer(ma3Handle, 0, 0, to_copy, tempBuffer) == to_copy)
+         ArrayCopy(WorkMa3, tempBuffer, rates_total - to_copy, 0, to_copy);
+      // Copy MA201
+      if(CopyBuffer(ma201Handle, 0, 0, to_copy, tempBuffer) == to_copy)
+         ArrayCopy(WorkMa201, tempBuffer, rates_total - to_copy, 0, to_copy);
+   }
 
    if(prev_calculated == 0)
    {
