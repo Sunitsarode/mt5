@@ -1,6 +1,13 @@
 //+------------------------------------------------------------------+
-//|                         ScoreBuy Strategy (EA)                   |
+//|                         ScoreBuy with fixed target handle all position with magic nnumber Strategy (EA)                   |
 //| Uses external indicators: Sumit_RSI_Score_Indicator + supertrend |
+//| Buy when sumit >=30 and prev candle low or close breaks
+// prev_candle_chk = 'low' or 'close'
+// if low then entry as soon as low breaks
+// SBuyFT_Magic_HLentry_1.mq5 + stepped target instead of fixed added variable 
+// target_steps = {0,0.003,0.006,0.009,0.012,0.015,0.018,0.021,0.024,0.027,0.030} // increase as per lot step
+// TargetPercent = TargetPercent + target_steps 
+// logic = if lotsize increases the target also should increase as per target array
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
 #property version   "1.04"

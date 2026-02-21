@@ -1,6 +1,7 @@
 //+------------------------------------------------------------------+
-//|                         ScoreBuy Strategy (EA)                   |
+//|                         ScoreBuy with fixed target handle all position with magic no Strategy (EA)                   |
 //| Uses external indicators: Sumit_RSI_Score_Indicator + supertrend |
+//| 
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
 #property version   "1.04"
