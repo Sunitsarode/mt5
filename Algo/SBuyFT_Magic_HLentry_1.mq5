@@ -6,7 +6,7 @@
 // if low then entry as soon as low breaks
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
-#property version   "1.04"
+#property version   "1.05"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -30,10 +30,12 @@ input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN;
 input bool SupertrendTakeWicksIntoAccount = true;
 
 // Trading logic
-input double MinTargetPoints = 10.0;   // Minimum TP distance in points
+input double MinTargetPoints = 10.0;   // Minimum TP distance in pip
 input double TargetPercent = 0.01;     // TP distance in percent of entry price
-input bool SetTargetWithEntry = true;  // Place broker TP in the entry request
-input double TrailingTargetPips = 5.0; // Used only when SetTargetWithEntry=false (0 disables trailing)
+input bool SetTargetWithEntry = false;  // Place broker TP in the entry request
+input double TrailingTargetPips = 0.005; // Used only when SetTargetWithEntry=false, interpreted as percent (0 disables trailing)
+input string chk_last_candle_breaks = "C"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
+input string chk_last_candle_type = "0";   // 0=disabled, G=green candle, R=red candle
 input bool RecoverExistingMagicPositions = true; // Rebuild and manage existing magic positions on restart
 input double LotSize = 0.01;
 input double LotStep = 0.01;
@@ -132,11 +134,53 @@ double CalculateTargetPrice(const double entry_price)
    return NormalizePrice(entry_price + CalculateTargetDistance(entry_price));
 }
 
-double CalculateTrailingDistance()
+double CalculateTrailingDistance(const double reference_price)
 {
-   if(TrailingTargetPips <= 0.0)
+   if(TrailingTargetPips <= 0.0 || reference_price <= 0.0)
       return 0.0;
-   return TrailingTargetPips * g_pip;
+   return reference_price * (TrailingTargetPips / 100.0);
+}
+
+bool IsLastCandleBreakConditionMet(const double price)
+{
+   string break_mode = chk_last_candle_breaks;
+   StringTrimLeft(break_mode);
+   StringTrimRight(break_mode);
+   StringToUpper(break_mode);
+   if(break_mode == "" || break_mode == "0")
+      return true;
+
+   string type_mode = chk_last_candle_type;
+   StringTrimLeft(type_mode);
+   StringTrimRight(type_mode);
+   StringToUpper(type_mode);
+
+   double prev_high = iHigh(_Symbol, PERIOD_CURRENT, 1);
+   double prev_low = iLow(_Symbol, PERIOD_CURRENT, 1);
+   double prev_open = iOpen(_Symbol, PERIOD_CURRENT, 1);
+   double prev_close = iClose(_Symbol, PERIOD_CURRENT, 1);
+
+   if(prev_high <= 0.0 || prev_low <= 0.0 || prev_open <= 0.0 || prev_close <= 0.0)
+      return false;
+
+   if(type_mode == "G" && prev_close <= prev_open)
+      return false;
+   if(type_mode == "R" && prev_close >= prev_open)
+      return false;
+
+   double break_level = 0.0;
+   if(break_mode == "H")
+      break_level = prev_high;
+   else if(break_mode == "L")
+      break_level = prev_low;
+   else if(break_mode == "O")
+      break_level = prev_open;
+   else if(break_mode == "C")
+      break_level = prev_close;
+   else
+      return true; // Invalid value behaves like disabled
+
+   return (price < break_level);
 }
 
 double CalculateStepDistance(const double reference_price)
@@ -407,8 +451,7 @@ void CheckTargets(const bool hedging, const double current_price)
    if(total == 0)
       return;
 
-   double trailing_distance = CalculateTrailingDistance();
-   bool use_trailing = (!SetTargetWithEntry && trailing_distance > 0.0);
+   bool use_trailing = (!SetTargetWithEntry && TrailingTargetPips > 0.0);
 
    for(int i = 0; i < total; i++)
    {
@@ -437,6 +480,9 @@ void CheckTargets(const bool hedging, const double current_price)
          if(current_price > tranches[i].trailing_peak)
             tranches[i].trailing_peak = current_price;
 
+         double trailing_distance = CalculateTrailingDistance(tranches[i].trailing_peak);
+         if(trailing_distance <= 0.0)
+            continue;
          double trailing_stop = tranches[i].trailing_peak - trailing_distance;
          if(current_price <= trailing_stop)
             should_close = true;
@@ -609,7 +655,7 @@ int OnInit()
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
    PrintFormat("Price format: digits=%d point=%.10f pip=%.10f", g_digits, g_point, g_pip);
-   PrintFormat("Mode: SetTargetWithEntry=%s TrailingTargetPips=%.2f RecoverExistingMagicPositions=%s",
+   PrintFormat("Mode: SetTargetWithEntry=%s TrailingTargetPercent=%.4f RecoverExistingMagicPositions=%s",
                SetTargetWithEntry ? "true" : "false",
                TrailingTargetPips,
                RecoverExistingMagicPositions ? "true" : "false");
@@ -681,6 +727,9 @@ void OnTick()
       if(!scoreOk)
          return;
 
+      if(!IsLastCandleBreakConditionMet(bid))
+         return;
+
       if(last_entry_price_ref > 0.0)
       {
          if(MathAbs(bid - last_entry_price_ref) < CalculateStepDistance(last_entry_price_ref))
@@ -695,6 +744,9 @@ void OnTick()
       return;
 
    if(!scoreOk)
+      return;
+
+   if(!IsLastCandleBreakConditionMet(bid))
       return;
 
    if(last_entry_price_open > 0.0 && bid <= (last_entry_price_open - CalculateStepDistance(last_entry_price_open)))
