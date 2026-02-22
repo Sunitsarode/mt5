@@ -1,6 +1,6 @@
-
-//+------------------------------------------------------------------+
-//|        Combined Buy + Sell strategy with separate side controls   |
+//+---------------------ssBuySell_Magic_HLentry_1.mq5---------------------------------------------+
+//|      
+//   Combined Buy + Sell strategy with separate side controls   |
 //| Uses external indicators: Sumit_RSI_Score_Indicator + supertrend |
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
@@ -13,7 +13,7 @@
 input int Rsi1hPeriod = 51;
 input int SumitMaBuyThreshold = 30;
 input int SumitMaSellThreshold = 70;
-input int Rsi1hBuyThreshold = 40;
+input int Rsi1hBuyThreshold = 35;
 input int Rsi1hSellThreshold = 55;
 input int SumitSma3Period = 3;
 input int SumitSma201Period = 201;
@@ -40,14 +40,14 @@ input double TrailingTargetPips = 0.005; // Used only when SetTargetWithEntry=fa
 input bool RecoverExistingMagicPositions = true; // Rebuild and manage existing magic positions on restart
 
 // Buy-side settings
-input string chk_last_candle_breaks_buy = "C"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
+input string chk_last_candle_breaks_buy = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
 input string chk_last_candle_type_buy = "0";   // 0=disabled, G=green candle, R=red candle
 input double BuyLotSize = 0.01;
 input double BuyLotStep = 0.01;
 input int BuyMaxEntries = 0; // 0 = unlimited
 
 // Sell-side settings
-input string chk_last_candle_breaks_sell = "C"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
+input string chk_last_candle_breaks_sell = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
 input string chk_last_candle_type_sell = "0";   // 0=disabled, G=green candle, R=red candle
 input double SellLotSize = 0.01;
 input double SellLotStep = 0.01;
