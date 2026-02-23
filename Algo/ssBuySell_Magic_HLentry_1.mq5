@@ -25,12 +25,14 @@ input bool SellEntry = true;
 input int EntryScoreThresholdBuy = 30;   // Buy condition: score <= threshold
 input int EntryScoreThresholdSell = 70;  // Sell condition: score >= threshold
 
-// SuperTrend filter (1H timeframe)
+// SuperTrend filter (runtime-selectable timeframe)
 input bool UseSuperTrend = false;
-input int SupertrendAtrPeriod = 22;
-input double SupertrendMultiplier = 3.0;
-input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN;
-input bool SupertrendTakeWicksIntoAccount = true;
+input int SupertrendAtrPeriod = 51;
+input double SupertrendMultiplier = 0.5;
+input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_H1; // e.g. PERIOD_M15 for 15m
+input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
+input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
+input bool SupetrendBasedSL = false; // Close reverse-side trades when SuperTrend direction flips
 
 // Trading logic (common)
 input double MinTargetPoints = 10.0;    // Minimum TP distance in points
@@ -92,6 +94,12 @@ datetime last_bar_time = 0;
 
 int sumitScoreHandle = INVALID_HANDLE;
 int supertrendH1Handle = INVALID_HANDLE;
+int supertrend_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
+
+// Forward declarations used by SuperTrend flip-based SL helpers.
+bool IsManagedPosition(const ulong magic, const int position_type);
+void SyncTranchesBuy(const bool hedging);
+void SyncTranchesSell(const bool hedging);
 
 // Cached symbol properties (faster than repeated SymbolInfoDouble calls)
 double g_vol_min = 0.0;
@@ -190,36 +198,103 @@ bool GetScoreValue(const int shift, double &score)
    return true;
 }
 
-bool IsSuperTrendBullishH1(const int shift)
+int GetSuperTrendDirection(const int shift)
 {
    if(supertrendH1Handle == INVALID_HANDLE)
-      return false;
+      return 0;
 
    double direction_value[1];
    int copied = CopyBuffer(supertrendH1Handle, 2, shift, 1, direction_value);
    if(copied != 1)
-      return false;
+      return 0;
 
    if(direction_value[0] == EMPTY_VALUE)
-      return false;
+      return 0;
 
-   return (direction_value[0] > 0.0);
+   if(direction_value[0] > 0.0)
+      return 1;
+   if(direction_value[0] < 0.0)
+      return -1;
+
+   return 0;
 }
+
+bool IsSuperTrendBullishH1(const int shift)
+{
+   return (GetSuperTrendDirection(shift) > 0);
+}
+
 
 bool IsSuperTrendBearishH1(const int shift)
 {
-   if(supertrendH1Handle == INVALID_HANDLE)
-      return false;
+   return (GetSuperTrendDirection(shift) < 0);
+}
 
-   double direction_value[1];
-   int copied = CopyBuffer(supertrendH1Handle, 2, shift, 1, direction_value);
-   if(copied != 1)
-      return false;
+int CloseAllManagedPositions(const ulong magic, const int position_type, const string reason)
+{
+   int closed_count = 0;
+   int ptotal = PositionsTotal();
 
-   if(direction_value[0] == EMPTY_VALUE)
-      return false;
+   for(int i = ptotal - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0 || !PositionSelectByTicket(ticket))
+         continue;
+      if(!IsManagedPosition(magic, position_type))
+         continue;
 
-   return (direction_value[0] < 0.0);
+      trade.SetExpertMagicNumber(magic);
+      trade.SetDeviationInPoints(Deviation);
+
+      if(trade.PositionClose(ticket))
+      {
+         closed_count++;
+      }
+      else
+      {
+         PrintFormat("%s close failed. ticket=%I64u magic=%I64u retcode=%d (%s)",
+                     reason, ticket, magic, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      }
+   }
+
+   if(closed_count > 0)
+   {
+      PrintFormat("%s close count=%d magic=%I64u", reason, closed_count, magic);
+   }
+
+   return closed_count;
+}
+
+void ApplySupertrendBasedSL(const bool hedging)
+{
+   if(!UseSuperTrend || !SupetrendBasedSL || supertrendH1Handle == INVALID_HANDLE)
+      return;
+
+   int current_direction = GetSuperTrendDirection(1);
+   if(current_direction == 0)
+      return;
+
+   if(supertrend_last_direction == 0)
+   {
+      supertrend_last_direction = current_direction;
+      return;
+   }
+
+   if(current_direction == supertrend_last_direction)
+      return;
+
+   if(current_direction > 0)
+   {
+      if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
+         SyncTranchesSell(hedging);
+   }
+   else
+   {
+      if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
+         SyncTranchesBuy(hedging);
+   }
+
+   supertrend_last_direction = current_direction;
 }
 
 bool IsLastCandleBreakConditionMet(const double price, const string break_input, const string type_input, const bool is_buy)
@@ -1140,7 +1215,7 @@ int OnInit()
    {
       supertrendH1Handle = iCustom(
          _Symbol,
-         PERIOD_H1,
+         Supertrend_Timeframe,
          "supertrend",
          SupertrendAtrPeriod,
          SupertrendMultiplier,
@@ -1150,9 +1225,13 @@ int OnInit()
 
       if(supertrendH1Handle == INVALID_HANDLE)
       {
-         PrintFormat("Failed to create SuperTrend H1 handle. err=%d", GetLastError());
+         PrintFormat("Failed to create SuperTrend handle (%s). err=%d",
+                     EnumToString(Supertrend_Timeframe),
+                     GetLastError());
          return(INIT_FAILED);
       }
+
+      supertrend_last_direction = GetSuperTrendDirection(1);
    }
 
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
@@ -1167,6 +1246,10 @@ int OnInit()
                SellEntry ? "true" : "false",
                BuyMagicNumber,
                SellMagicNumber);
+   PrintFormat("SuperTrend config: UseSuperTrend=%s Timeframe=%s SupetrendBasedSL=%s",
+               UseSuperTrend ? "true" : "false",
+               EnumToString(Supertrend_Timeframe),
+               SupetrendBasedSL ? "true" : "false");
 
    if(RecoverExistingMagicPositions)
    {
@@ -1177,7 +1260,8 @@ int OnInit()
       RebuildTranchesFromPositionsSell(hedging);
    }
 
-   Print("Strategy uses external score + optional H1 SuperTrend filters for both sides.");
+   PrintFormat("Strategy uses external score + optional SuperTrend filters for both sides (timeframe=%s).",
+               EnumToString(Supertrend_Timeframe));
 
    return(INIT_SUCCEEDED);
 }
@@ -1206,6 +1290,7 @@ void OnTick()
    RebuildTranchesFromPositionsSell(hedging);
    EnsureServerTargetsForOpenPositionsBuy(hedging);
    EnsureServerTargetsForOpenPositionsSell(hedging);
+   ApplySupertrendBasedSL(hedging);
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
