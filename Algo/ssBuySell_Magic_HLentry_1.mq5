@@ -13,7 +13,7 @@
 input int Rsi1hPeriod = 51;
 input int SumitMaBuyThreshold = 30;
 input int SumitMaSellThreshold = 70;
-input int Rsi1hBuyThreshold = 35;
+input int Rsi1hBuyThreshold = 40;
 input int Rsi1hSellThreshold = 55;
 input int SumitSma3Period = 3;
 input int SumitSma201Period = 201;
@@ -22,17 +22,16 @@ input int SumitRsiPeriod = 7;
 // Side enable + score threshold
 input bool BuyEntry = true;
 input bool SellEntry = true;
-input int EntryScoreThresholdBuy = 30;   // Buy condition: score <= threshold
-input int EntryScoreThresholdSell = 70;  // Sell condition: score >= threshold
+input int EntryScoreThresholdBuy = 40;   // Buy condition: score <= threshold
+input int EntryScoreThresholdSell = 60;  // Sell condition: score >= threshold
 
 // SuperTrend filter (runtime-selectable timeframe)
 input bool UseSuperTrend = false;
 input int SupertrendAtrPeriod = 51;
 input double SupertrendMultiplier = 0.5;
-input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_H1; // e.g. PERIOD_M15 for 15m
+input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_M15; // e.g.  PERIOD_H1
 input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
-input bool SupetrendBasedSL = false; // Close reverse-side trades when SuperTrend direction flips
 
 // Trading logic (common)
 input double MinTargetPoints = 10.0;    // Minimum TP distance in points
@@ -94,12 +93,6 @@ datetime last_bar_time = 0;
 
 int sumitScoreHandle = INVALID_HANDLE;
 int supertrendH1Handle = INVALID_HANDLE;
-int supertrend_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
-
-// Forward declarations used by SuperTrend flip-based SL helpers.
-bool IsManagedPosition(const ulong magic, const int position_type);
-void SyncTranchesBuy(const bool hedging);
-void SyncTranchesSell(const bool hedging);
 
 // Cached symbol properties (faster than repeated SymbolInfoDouble calls)
 double g_vol_min = 0.0;
@@ -198,103 +191,36 @@ bool GetScoreValue(const int shift, double &score)
    return true;
 }
 
-int GetSuperTrendDirection(const int shift)
+bool IsSuperTrendBullishH1(const int shift)
 {
    if(supertrendH1Handle == INVALID_HANDLE)
-      return 0;
+      return false;
 
    double direction_value[1];
    int copied = CopyBuffer(supertrendH1Handle, 2, shift, 1, direction_value);
    if(copied != 1)
-      return 0;
+      return false;
 
    if(direction_value[0] == EMPTY_VALUE)
-      return 0;
+      return false;
 
-   if(direction_value[0] > 0.0)
-      return 1;
-   if(direction_value[0] < 0.0)
-      return -1;
-
-   return 0;
+   return (direction_value[0] > 0.0);
 }
-
-bool IsSuperTrendBullishH1(const int shift)
-{
-   return (GetSuperTrendDirection(shift) > 0);
-}
-
 
 bool IsSuperTrendBearishH1(const int shift)
 {
-   return (GetSuperTrendDirection(shift) < 0);
-}
+   if(supertrendH1Handle == INVALID_HANDLE)
+      return false;
 
-int CloseAllManagedPositions(const ulong magic, const int position_type, const string reason)
-{
-   int closed_count = 0;
-   int ptotal = PositionsTotal();
+   double direction_value[1];
+   int copied = CopyBuffer(supertrendH1Handle, 2, shift, 1, direction_value);
+   if(copied != 1)
+      return false;
 
-   for(int i = ptotal - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(!IsManagedPosition(magic, position_type))
-         continue;
+   if(direction_value[0] == EMPTY_VALUE)
+      return false;
 
-      trade.SetExpertMagicNumber(magic);
-      trade.SetDeviationInPoints(Deviation);
-
-      if(trade.PositionClose(ticket))
-      {
-         closed_count++;
-      }
-      else
-      {
-         PrintFormat("%s close failed. ticket=%I64u magic=%I64u retcode=%d (%s)",
-                     reason, ticket, magic, trade.ResultRetcode(), trade.ResultRetcodeDescription());
-      }
-   }
-
-   if(closed_count > 0)
-   {
-      PrintFormat("%s close count=%d magic=%I64u", reason, closed_count, magic);
-   }
-
-   return closed_count;
-}
-
-void ApplySupertrendBasedSL(const bool hedging)
-{
-   if(!UseSuperTrend || !SupetrendBasedSL || supertrendH1Handle == INVALID_HANDLE)
-      return;
-
-   int current_direction = GetSuperTrendDirection(1);
-   if(current_direction == 0)
-      return;
-
-   if(supertrend_last_direction == 0)
-   {
-      supertrend_last_direction = current_direction;
-      return;
-   }
-
-   if(current_direction == supertrend_last_direction)
-      return;
-
-   if(current_direction > 0)
-   {
-      if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
-         SyncTranchesSell(hedging);
-   }
-   else
-   {
-      if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
-         SyncTranchesBuy(hedging);
-   }
-
-   supertrend_last_direction = current_direction;
+   return (direction_value[0] < 0.0);
 }
 
 bool IsLastCandleBreakConditionMet(const double price, const string break_input, const string type_input, const bool is_buy)
@@ -1230,8 +1156,6 @@ int OnInit()
                      GetLastError());
          return(INIT_FAILED);
       }
-
-      supertrend_last_direction = GetSuperTrendDirection(1);
    }
 
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
@@ -1246,10 +1170,6 @@ int OnInit()
                SellEntry ? "true" : "false",
                BuyMagicNumber,
                SellMagicNumber);
-   PrintFormat("SuperTrend config: UseSuperTrend=%s Timeframe=%s SupetrendBasedSL=%s",
-               UseSuperTrend ? "true" : "false",
-               EnumToString(Supertrend_Timeframe),
-               SupetrendBasedSL ? "true" : "false");
 
    if(RecoverExistingMagicPositions)
    {
@@ -1290,7 +1210,6 @@ void OnTick()
    RebuildTranchesFromPositionsSell(hedging);
    EnsureServerTargetsForOpenPositionsBuy(hedging);
    EnsureServerTargetsForOpenPositionsSell(hedging);
-   ApplySupertrendBasedSL(hedging);
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
