@@ -1,7 +1,7 @@
 //+---------------------ssBuySell_Magic_HLentry_1.mq5---------------------------------------------+
 //|      
 //   Combined Buy + Sell strategy with separate side controls   |
-//| Uses external indicators: Sumit_RSI_Score_Indicator + supertrend |
+//| Uses external indicators: Sumit_RSI_Score_Indicator + 3by7 MA Cross |
 //
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
