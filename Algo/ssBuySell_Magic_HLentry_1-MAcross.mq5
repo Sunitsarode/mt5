@@ -10,6 +10,13 @@
 
 #include <Trade/Trade.mqh>
 
+enum ENUM_MACROSS_SIGNAL_MODE
+{
+   MACROSS_CONFIRMED = 0, // Use closed candle MA state (stable, later)
+   MACROSS_INTRABAR = 1,  // Use current candle MA state (faster, noisier)
+   MACROSS_PREDICTIVE = 2 // Anticipate near cross using MA gap + spread velocity
+};
+
 // Inputs for Sumit_RSI_Score_Indicator
 input int Rsi1hPeriod = 51;
 input int SumitMaBuyThreshold = 30;
@@ -35,11 +42,26 @@ input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, P
 input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
 input bool SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
 
+// MA Cross filter (MA-1 vs MA-2)
+input bool UseMACross = true;
+input ENUM_TIMEFRAMES MATimeframe = PERIOD_CURRENT;
+input int MA1Period = 3;
+input ENUM_MA_METHOD MA1Method = MODE_EMA;
+input ENUM_APPLIED_PRICE MA1Price = PRICE_CLOSE;
+input int MA2Period = 7;
+input ENUM_MA_METHOD MA2Method = MODE_EMA;
+input ENUM_APPLIED_PRICE MA2Price = PRICE_CLOSE;
+input ENUM_MACROSS_SIGNAL_MODE MACrossMode = MACROSS_CONFIRMED;
+input bool MAPredictiveUseATR = true; // Predictive mode: derive gap from ATR so it scales by symbol volatility
+input int MAPredictiveATRPeriod = 14;
+input double MAPredictiveATRMultiplier = 0.10; // Effective predictive gap = ATR * multiplier
+input double MAPredictiveGapPoints = 20.0; // Fallback fixed gap (points) when ATR mode is off/unavailable
+
 // Trading logic (common)
-input double MinTargetPoints = 10.0;    // Minimum TP distance in points
-input double TargetPercent = 0.01;      // TP distance in percent of entry price
-input bool SetTargetWithEntry = false;  // Place broker TP in the entry request
-input double TrailingTargetPips = 0.005; // Used only when SetTargetWithEntry=false, interpreted as percent (0 disables trailing)
+double MinTargetPoints = 0.0;    // Not used in pure MA-cross mode
+double TargetPercent = 0.0;      // Not used in pure MA-cross mode
+bool SetTargetWithEntry = false; // Not used in pure MA-cross mode
+double TrailingTargetPips = 0.0; // Not used in pure MA-cross mode
 input bool RecoverExistingMagicPositions = true; // Rebuild and manage existing magic positions on restart
 
 // Buy-side settings
@@ -95,6 +117,9 @@ datetime last_bar_time = 0;
 
 int sumitScoreHandle = INVALID_HANDLE;
 int supertrendH1Handle = INVALID_HANDLE;
+int ma1Handle = INVALID_HANDLE;
+int ma2Handle = INVALID_HANDLE;
+int maPredictiveAtrHandle = INVALID_HANDLE;
 int supertrend_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
 
 // Cached symbol properties (faster than repeated SymbolInfoDouble calls)
@@ -223,6 +248,139 @@ bool IsSuperTrendBullishH1(const int shift)
 bool IsSuperTrendBearishH1(const int shift)
 {
    return (GetSuperTrendDirection(shift) < 0);
+}
+
+bool GetMAValue(const int handle, const int shift, double &value)
+{
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   double values[1];
+   int copied = CopyBuffer(handle, 0, shift, 1, values);
+   if(copied != 1)
+      return false;
+   if(values[0] == EMPTY_VALUE)
+      return false;
+
+   value = values[0];
+   return true;
+}
+
+double GetMAPredictiveGapPrice()
+{
+   if(MAPredictiveUseATR && maPredictiveAtrHandle != INVALID_HANDLE)
+   {
+      double atr_values[1];
+      int copied = CopyBuffer(maPredictiveAtrHandle, 0, 0, 1, atr_values);
+      if(copied == 1 && atr_values[0] != EMPTY_VALUE && atr_values[0] > 0.0)
+         return (atr_values[0] * MathMax(0.0, MAPredictiveATRMultiplier));
+   }
+
+   return (MathMax(0.0, MAPredictiveGapPoints) * g_point);
+}
+
+int GetMACrossDirection()
+{
+   if(!UseMACross || ma1Handle == INVALID_HANDLE || ma2Handle == INVALID_HANDLE)
+      return 0;
+
+   double ma1_0 = 0.0;
+   double ma2_0 = 0.0;
+   if(!GetMAValue(ma1Handle, 0, ma1_0) || !GetMAValue(ma2Handle, 0, ma2_0))
+      return 0;
+
+   if(MACrossMode == MACROSS_CONFIRMED)
+   {
+      double ma1_1 = 0.0;
+      double ma2_1 = 0.0;
+      if(!GetMAValue(ma1Handle, 1, ma1_1) || !GetMAValue(ma2Handle, 1, ma2_1))
+         return 0;
+      if(ma1_1 > ma2_1)
+         return 1;
+      if(ma1_1 < ma2_1)
+         return -1;
+      return 0;
+   }
+
+   if(MACrossMode == MACROSS_INTRABAR)
+   {
+      if(ma1_0 > ma2_0)
+         return 1;
+      if(ma1_0 < ma2_0)
+         return -1;
+      return 0;
+   }
+
+   double ma1_1 = 0.0;
+   double ma2_1 = 0.0;
+   if(!GetMAValue(ma1Handle, 1, ma1_1) || !GetMAValue(ma2Handle, 1, ma2_1))
+      return 0;
+
+   double spread0 = ma1_0 - ma2_0;
+   double spread1 = ma1_1 - ma2_1;
+   double spread_velocity = spread0 - spread1;
+   double predictive_gap = GetMAPredictiveGapPrice();
+
+   if(spread0 > 0.0)
+   {
+      // Fast MA is still above, but spread is shrinking near zero -> early bearish warning.
+      if(predictive_gap > 0.0 && spread0 <= predictive_gap && spread_velocity < 0.0)
+         return -1;
+      return 1;
+   }
+   if(spread0 < 0.0)
+   {
+      // Fast MA is still below, but spread is closing near zero -> early bullish warning.
+      if(predictive_gap > 0.0 && MathAbs(spread0) <= predictive_gap && spread_velocity > 0.0)
+         return 1;
+      return -1;
+   }
+
+   if(spread_velocity > 0.0)
+      return 1;
+   if(spread_velocity < 0.0)
+      return -1;
+
+   return 0;
+}
+
+bool IsMACrossBullish()
+{
+   return (GetMACrossDirection() > 0);
+}
+
+bool IsMACrossBearish()
+{
+   return (GetMACrossDirection() < 0);
+}
+
+int GetMACrossEventDirection()
+{
+   if(!UseMACross || ma1Handle == INVALID_HANDLE || ma2Handle == INVALID_HANDLE)
+      return 0;
+
+   int curr_shift = (MACrossMode == MACROSS_CONFIRMED) ? 1 : 0;
+   int prev_shift = curr_shift + 1;
+
+   double ma1_curr = 0.0;
+   double ma2_curr = 0.0;
+   double ma1_prev = 0.0;
+   double ma2_prev = 0.0;
+
+   if(!GetMAValue(ma1Handle, curr_shift, ma1_curr) || !GetMAValue(ma2Handle, curr_shift, ma2_curr))
+      return 0;
+   if(!GetMAValue(ma1Handle, prev_shift, ma1_prev) || !GetMAValue(ma2Handle, prev_shift, ma2_prev))
+      return 0;
+
+   double spread_curr = ma1_curr - ma2_curr;
+   double spread_prev = ma1_prev - ma2_prev;
+
+   if(spread_prev <= 0.0 && spread_curr > 0.0)
+      return 1;  // upside cross
+   if(spread_prev >= 0.0 && spread_curr < 0.0)
+      return -1; // downside cross
+
+   return 0;
 }
 
 bool IsLastCandleBreakConditionMet(const double price, const string break_input, const string type_input, const bool is_buy)
@@ -1001,6 +1159,8 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
 
    if(UseSuperTrend && !IsSuperTrendBullishH1(1))
       return;
+   if(UseMACross && !IsMACrossBullish())
+      return;
 
    int openCount = OpenTrancheCountBuy();
    int scoreTrigger = EntryScoreThresholdBuy;
@@ -1052,6 +1212,8 @@ void ProcessSell(const bool hedging, const double bid, const double ask, const d
       return;
 
    if(UseSuperTrend && !IsSuperTrendBearishH1(1))
+      return;
+   if(UseMACross && !IsMACrossBearish())
       return;
 
    int openCount = OpenTrancheCountSell();
@@ -1225,6 +1387,51 @@ int OnInit()
       supertrend_last_direction = GetSuperTrendDirection(1);
    }
 
+   if(UseMACross)
+   {
+      if(MA1Period <= 0 || MA2Period <= 0)
+      {
+         PrintFormat("Invalid MA periods. MA1=%d MA2=%d", MA1Period, MA2Period);
+         return(INIT_FAILED);
+      }
+
+      ma1Handle = iMA(_Symbol, MATimeframe, MA1Period, 0, MA1Method, MA1Price);
+      if(ma1Handle == INVALID_HANDLE)
+      {
+         PrintFormat("Failed to create MA-1 handle. period=%d timeframe=%s err=%d",
+                     MA1Period, EnumToString(MATimeframe), GetLastError());
+         return(INIT_FAILED);
+      }
+
+      ma2Handle = iMA(_Symbol, MATimeframe, MA2Period, 0, MA2Method, MA2Price);
+      if(ma2Handle == INVALID_HANDLE)
+      {
+         PrintFormat("Failed to create MA-2 handle. period=%d timeframe=%s err=%d",
+                     MA2Period, EnumToString(MATimeframe), GetLastError());
+         return(INIT_FAILED);
+      }
+
+      if(MA1Period == MA2Period)
+         Print("Warning: MA1Period equals MA2Period; MA cross filtering will have weak differentiation.");
+
+      if(MACrossMode == MACROSS_PREDICTIVE && MAPredictiveUseATR)
+      {
+         if(MAPredictiveATRPeriod <= 0)
+         {
+            PrintFormat("Invalid MAPredictiveATRPeriod=%d", MAPredictiveATRPeriod);
+            return(INIT_FAILED);
+         }
+
+         maPredictiveAtrHandle = iATR(_Symbol, MATimeframe, MAPredictiveATRPeriod);
+         if(maPredictiveAtrHandle == INVALID_HANDLE)
+         {
+            PrintFormat("Failed to create predictive ATR handle. period=%d timeframe=%s err=%d",
+                        MAPredictiveATRPeriod, EnumToString(MATimeframe), GetLastError());
+            return(INIT_FAILED);
+         }
+      }
+   }
+
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
    PrintFormat("Price format: digits=%d point=%.10f pip=%.10f", g_digits, g_point, g_pip);
@@ -1247,8 +1454,22 @@ int OnInit()
       RebuildTranchesFromPositionsSell(hedging);
    }
 
-   PrintFormat("Strategy uses external score + optional SuperTrend filters for both sides (timeframe=%s).",
-               EnumToString(Supertrend_Timeframe));
+   PrintFormat("Filters: SuperTrend=%s(%s) MAcross=%s(mode=%s tf=%s MA1=%d MA2=%d).",
+               UseSuperTrend ? "on" : "off",
+               EnumToString(Supertrend_Timeframe),
+               UseMACross ? "on" : "off",
+               EnumToString(MACrossMode),
+               EnumToString(MATimeframe),
+               MA1Period,
+               MA2Period);
+   if(UseMACross && MACrossMode == MACROSS_PREDICTIVE)
+   {
+      PrintFormat("Predictive MA gap mode: ATR=%s period=%d mult=%.4f fallbackPoints=%.2f",
+                  MAPredictiveUseATR ? "on" : "off",
+                  MAPredictiveATRPeriod,
+                  MAPredictiveATRMultiplier,
+                  MAPredictiveGapPoints);
+   }
 
    return(INIT_SUCCEEDED);
 }
@@ -1259,6 +1480,12 @@ void OnDeinit(const int reason)
       IndicatorRelease(sumitScoreHandle);
    if(supertrendH1Handle != INVALID_HANDLE)
       IndicatorRelease(supertrendH1Handle);
+   if(ma1Handle != INVALID_HANDLE)
+      IndicatorRelease(ma1Handle);
+   if(ma2Handle != INVALID_HANDLE)
+      IndicatorRelease(ma2Handle);
+   if(maPredictiveAtrHandle != INVALID_HANDLE)
+      IndicatorRelease(maPredictiveAtrHandle);
 }
 
 //+------------------------------------------------------------------+
@@ -1282,13 +1509,13 @@ void OnTick()
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
 
-   if(!SetTargetWithEntry)
-   {
-      CheckTargetsBuy(hedging, bid);
-      CheckTargetsSell(hedging, ask);
-   }
+   // Pure MA-cross mode: positions are managed by opposite MA cross / SuperTrend protection.
 
-   if(UseNewBar)
+   bool gate_on_new_bar = UseNewBar;
+   if(UseMACross && (MACrossMode == MACROSS_INTRABAR || MACrossMode == MACROSS_PREDICTIVE))
+      gate_on_new_bar = false;
+
+   if(gate_on_new_bar)
    {
       datetime bar_time = iTime(_Symbol, PERIOD_CURRENT, 0);
       if(bar_time == 0 || bar_time == last_bar_time)
@@ -1296,10 +1523,23 @@ void OnTick()
       last_bar_time = bar_time;
    }
 
-   double score = EMPTY_VALUE;
-   if(!GetScoreValue(1, score))
+   int cross_event = GetMACrossEventDirection();
+   if(cross_event == 0)
       return;
 
-   ProcessBuy(hedging, bid, ask, score);
-   ProcessSell(hedging, bid, ask, score);
+   if(cross_event > 0)
+   {
+      if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "MA upside cross: closing sells") > 0)
+         SyncTranchesSell(hedging);
+
+      if(BuyEntry && (!UseSuperTrend || IsSuperTrendBullishH1(1)) && OpenTrancheCountBuy() == 0)
+         TryOpenEntryBuy(ask, BuyLotSize, hedging);
+      return;
+   }
+
+   if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "MA downside cross: closing buys") > 0)
+      SyncTranchesBuy(hedging);
+
+   if(SellEntry && (!UseSuperTrend || IsSuperTrendBearishH1(1)) && OpenTrancheCountSell() == 0)
+      TryOpenEntrySell(bid, SellLotSize, hedging);
 }
