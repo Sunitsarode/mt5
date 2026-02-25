@@ -22,8 +22,8 @@
  int SumitSma201Period = 201;
  int SumitRsiPeriod = 7;
 
-input int EntryScoreThresholdBuy = 40;   // Buy condition: score <= threshold
-input int EntryScoreThresholdSell = 60;  // Sell condition: score >= threshold
+input int EntryScoreThresholdBuy = 90;   // Buy condition: score <= threshold
+input int EntryScoreThresholdSell = 10;  // Sell condition: score >= threshold
 input bool Use_Sumit_Score = true;
 // Side enable + score threshold
 input bool BuyEntry = true;
@@ -39,30 +39,32 @@ input ENUM_TIMEFRAMES ST1Timeframe = PERIOD_CURRENT; // e.g. PERIOD_H1
 input bool UseSuperTrend2 = true;
 input int ST2AtrP = 51;
 input double ST2Mult = 0.5;
-input ENUM_TIMEFRAMES ST2Timeframe = PERIOD_M15;
-input bool SupetrendBasedSL = false; // 1. Close opposite-direction trades when SuperTrend flips 2. Set target of opp-directioned trades to entry point (Zero Loss) 0r 0.001%
-input double SupetrendBasedSLTarget = 0.0; // Percent from entry for flip-SL. 0=entry, -0.001 => buy SL=entry-0.001%, sell SL=entry+0.001%
+input ENUM_TIMEFRAMES ST2Timeframe = PERIOD_M30;
+input bool SupetrendBasedSL = true; // 1. Close opposite-direction trades when SuperTrend flips 2. Set target of opp-directioned trades to entry point (Zero Loss) 0r 0.001%
+input int SelectSTbasedSL = 2; // 0=any (ST-1 or ST-2), 1=ST-1 only, 2=ST-2 only
+input bool SupetrendBasedSLCloseNow = true; // true=immediate close on selected ST flip (N mode), false=set SL using target percent
+input double SupetrendBasedSLTarget = 0.0; // Used when closeNow=false. 0=entry, -0.001 => buy SL=entry-0.001%, sell SL=entry+0.001%
 
 input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
 
 // Trading logic (common)
 input double MinTargetPoints = 10.0;    // Minimum TP distance in points
-input double TargetPercent = 0.01;      // TP distance in percent of entry price
+input double TargetPercent = 0.021;      // TP distance in percent of entry price
 input bool SetTargetWithEntry = false;  // Place broker TP in the entry request
-input double TrailingTargetPips = 0.005; // Used only when SetTargetWithEntry=false, interpreted as percent (0 disables trailing)
+input double TrailingTargetPips = 0.002; // Used only when SetTargetWithEntry=false, interpreted as percent (0 disables trailing)
 input bool RecoverExistingMagicPositions = true; // Rebuild and manage existing magic positions on restart
 
 // Buy-side settings
-input string chk_last_candle_breaks_buy = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
 input string chk_last_candle_type_buy = "0";   // 0=disabled, G=green candle, R=red candle
+input string chk_last_candle_breaks_buy = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
 input double BuyLotSize = 0.01;
 input double BuyLotStep = 0.01;
 input int BuyMaxEntries = 0; // 0 = unlimited
 
 // Sell-side settings
-input string chk_last_candle_breaks_sell = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
 input string chk_last_candle_type_sell = "0";   // 0=disabled, G=green candle, R=red candle
+input string chk_last_candle_breaks_sell = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
 input double SellLotSize = 0.01;
 input double SellLotStep = 0.01;
 input int SellMaxEntries = 0; // 0 = unlimited
@@ -107,7 +109,8 @@ datetime last_bar_time = 0;
 int sumitScoreHandle = INVALID_HANDLE;
 int supertrend1Handle = INVALID_HANDLE;
 int supertrend2Handle = INVALID_HANDLE;
-int supertrend_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
+int supertrend1_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
+int supertrend2_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
 
 // Cached symbol properties (faster than repeated SymbolInfoDouble calls)
 double g_vol_min = 0.0;
@@ -274,13 +277,16 @@ bool IsLastCandleBreakConditionMet(const double price, const string break_input,
    StringTrimLeft(break_mode);
    StringTrimRight(break_mode);
    StringToUpper(break_mode);
-   if(break_mode == "" || break_mode == "0")
-      return true;
 
    string type_mode = type_input;
    StringTrimLeft(type_mode);
    StringTrimRight(type_mode);
    StringToUpper(type_mode);
+
+   bool use_break = (break_mode != "" && break_mode != "0");
+   bool use_type = (type_mode != "" && type_mode != "0");
+   if(!use_break && !use_type)
+      return true;
 
    double prev_high = iHigh(_Symbol, PERIOD_CURRENT, 1);
    double prev_low = iLow(_Symbol, PERIOD_CURRENT, 1);
@@ -290,27 +296,40 @@ bool IsLastCandleBreakConditionMet(const double price, const string break_input,
    if(prev_high <= 0.0 || prev_low <= 0.0 || prev_open <= 0.0 || prev_close <= 0.0)
       return false;
 
-   if(type_mode == "G" && prev_close <= prev_open)
-      return false;
-   if(type_mode == "R" && prev_close >= prev_open)
-      return false;
+   bool type_ok = true;
+   if(use_type)
+   {
+      if(type_mode == "G" && prev_close <= prev_open)
+         type_ok = false;
+      else if(type_mode == "R" && prev_close >= prev_open)
+         type_ok = false;
+   }
 
-   double break_level = 0.0;
-   if(break_mode == "H")
-      break_level = prev_high;
-   else if(break_mode == "L")
-      break_level = prev_low;
-   else if(break_mode == "O")
-      break_level = prev_open;
-   else if(break_mode == "C")
-      break_level = prev_close;
-   else
-      return true; // Invalid value behaves like disabled
+   bool break_ok = true;
+   if(use_break)
+   {
+      double break_level = 0.0;
+      if(break_mode == "H")
+         break_level = prev_high;
+      else if(break_mode == "L")
+         break_level = prev_low;
+      else if(break_mode == "O")
+         break_level = prev_open;
+      else if(break_mode == "C")
+         break_level = prev_close;
+      else
+         break_ok = true; // Invalid value behaves like disabled
 
-   if(is_buy)
-      return (price < break_level);
+      if(break_level > 0.0)
+      {
+         if(is_buy)
+            break_ok = (price < break_level);
+         else
+            break_ok = (price > break_level);
+      }
+   }
 
-   return (price > break_level);
+   return (type_ok && break_ok);
 }
 
 bool IsManagedPosition(const ulong magic, const int position_type)
@@ -1250,39 +1269,92 @@ void ApplySupertrendBasedSL(const bool hedging)
    if(!(UseSuperTrend1 || UseSuperTrend2) || !SupetrendBasedSL)
       return;
 
-   int current_direction = GetCombinedSuperTrendDirection(1);
-   if(current_direction == 0)
-      return;
+   int selected = SelectSTbasedSL;
+   if(selected < 0 || selected > 2)
+      selected = 0;
 
-   if(supertrend_last_direction == 0)
+   int st1_current = 0;
+   int st2_current = 0;
+   if(UseSuperTrend1)
+      st1_current = GetSuperTrendDirectionFromHandle(supertrend1Handle, 1);
+   if(UseSuperTrend2)
+      st2_current = GetSuperTrendDirectionFromHandle(supertrend2Handle, 1);
+
+   bool st1_flipped = false;
+   bool st2_flipped = false;
+
+   if(UseSuperTrend1 && st1_current != 0 && supertrend1_last_direction != 0 && st1_current != supertrend1_last_direction)
+      st1_flipped = true;
+   if(UseSuperTrend2 && st2_current != 0 && supertrend2_last_direction != 0 && st2_current != supertrend2_last_direction)
+      st2_flipped = true;
+
+   int flip_direction = 0;
+   if(selected == 1)
    {
-      supertrend_last_direction = current_direction;
-      return;
+      if(st1_flipped)
+         flip_direction = st1_current;
    }
-
-   if(current_direction == supertrend_last_direction)
-      return;
-
-   if(current_direction > 0)
+   else if(selected == 2)
    {
-      if(ApplySupertrendFlipSLToManagedPositions(SellMagicNumber,
-                                                 POSITION_TYPE_SELL,
-                                                 hedging,
-                                                 SupetrendBasedSLTarget,
-                                                 "SuperTrend flipped bullish: protecting sells") > 0)
-         SyncTranchesSell(hedging);
+      if(st2_flipped)
+         flip_direction = st2_current;
    }
    else
    {
-      if(ApplySupertrendFlipSLToManagedPositions(BuyMagicNumber,
-                                                 POSITION_TYPE_BUY,
-                                                 hedging,
-                                                 SupetrendBasedSLTarget,
-                                                 "SuperTrend flipped bearish: protecting buys") > 0)
-         SyncTranchesBuy(hedging);
+      // Any selected: trigger on first clear flip signal. If both flip opposite, skip as ambiguous.
+      if(st1_flipped && st2_flipped)
+      {
+         if(st1_current == st2_current)
+            flip_direction = st1_current;
+      }
+      else if(st1_flipped)
+         flip_direction = st1_current;
+      else if(st2_flipped)
+         flip_direction = st2_current;
    }
 
-   supertrend_last_direction = current_direction;
+   if(st1_current != 0)
+      supertrend1_last_direction = st1_current;
+   if(st2_current != 0)
+      supertrend2_last_direction = st2_current;
+
+   if(flip_direction == 0)
+      return;
+
+   if(flip_direction > 0)
+   {
+      if(SupetrendBasedSLCloseNow)
+      {
+         if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
+            SyncTranchesSell(hedging);
+      }
+      else
+      {
+         if(ApplySupertrendFlipSLToManagedPositions(SellMagicNumber,
+                                                    POSITION_TYPE_SELL,
+                                                    hedging,
+                                                    SupetrendBasedSLTarget,
+                                                    "SuperTrend flipped bullish: protecting sells") > 0)
+            SyncTranchesSell(hedging);
+      }
+   }
+   else
+   {
+      if(SupetrendBasedSLCloseNow)
+      {
+         if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
+            SyncTranchesBuy(hedging);
+      }
+      else
+      {
+         if(ApplySupertrendFlipSLToManagedPositions(BuyMagicNumber,
+                                                    POSITION_TYPE_BUY,
+                                                    hedging,
+                                                    SupetrendBasedSLTarget,
+                                                    "SuperTrend flipped bearish: protecting buys") > 0)
+            SyncTranchesBuy(hedging);
+      }
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1371,8 +1443,10 @@ int OnInit()
       }
    }
 
-   if(UseSuperTrend1 || UseSuperTrend2)
-      supertrend_last_direction = GetCombinedSuperTrendDirection(1);
+   if(UseSuperTrend1)
+      supertrend1_last_direction = GetSuperTrendDirectionFromHandle(supertrend1Handle, 1);
+   if(UseSuperTrend2)
+      supertrend2_last_direction = GetSuperTrendDirectionFromHandle(supertrend2Handle, 1);
 
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
@@ -1402,6 +1476,11 @@ int OnInit()
                EnumToString(ST1Timeframe),
                UseSuperTrend2 ? "on" : "off",
                EnumToString(ST2Timeframe));
+   PrintFormat("SuperTrend flip protection: enabled=%s select=%d closeNow=%s targetPercent=%.6f",
+               SupetrendBasedSL ? "true" : "false",
+               SelectSTbasedSL,
+               SupetrendBasedSLCloseNow ? "true" : "false",
+               SupetrendBasedSLTarget);
 
    return(INIT_SUCCEEDED);
 }
