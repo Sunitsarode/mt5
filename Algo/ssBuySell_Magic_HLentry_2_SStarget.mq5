@@ -11,7 +11,7 @@
 #include <Trade/Trade.mqh>
 
 // Inputs for Sumit_RSI_Score_Indicator
-input int Rsi1hPeriod = 32;
+input int Rsi1hPeriod = 31;
 input int Sumit_MaBuy = 30;
 input int Sumit_MaSell = 70;
 input int Rsi1hBuy = 40;

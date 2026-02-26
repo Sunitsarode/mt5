@@ -41,9 +41,9 @@ input int ST2AtrP = 51;
 input double ST2Mult = 0.5;
 input ENUM_TIMEFRAMES ST2Timeframe = PERIOD_M30;
 input bool SupetrendBasedSL = true; // 1. Close opposite-direction trades when SuperTrend flips 2. Set target of opp-directioned trades to entry point (Zero Loss) 0r 0.001%
-input int SelectSTbasedSL = 2; // 0=any (ST-1 or ST-2), 1=ST-1 only, 2=ST-2 only
-input bool SupetrendBasedSLCloseNow = true; // true=immediate close on selected ST flip (N mode), false=set SL using target percent
-input double SupetrendBasedSLTarget = 0.0; // Used when closeNow=false. 0=entry, -0.001 => buy SL=entry-0.001%, sell SL=entry+0.001%
+input int SelectSTbasedSL = 0; // 0=any (ST-1 or ST-2), 1=ST-1 only, 2=ST-2 only
+input bool SupetrendBasedSLCloseNow = true; // true=immediate close on selected ST flip; if target=0 then apply break-even SL instead
+input double SupetrendBasedSLTarget = 0.0; // 0=entry, -0.001 => buy SL=entry-0.001%, sell SL=entry+0.001%
 
 input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
@@ -192,9 +192,23 @@ double CalculateStepDistance(const double reference_price)
    return reference_price * (TargetPercent / 100.0);
 }
 
+bool IsIndicatorHandleReady(const int handle, const int required_bars)
+{
+   if(handle == INVALID_HANDLE)
+      return false;
+
+   int calculated = BarsCalculated(handle);
+   if(calculated < 0)
+      return false;
+
+   return(calculated >= required_bars);
+}
+
 bool GetScoreValue(const int shift, double &score)
 {
    if(sumitScoreHandle == INVALID_HANDLE)
+      return false;
+   if(!IsIndicatorHandleReady(sumitScoreHandle, shift + 2))
       return false;
 
    double score_value[1];
@@ -212,6 +226,8 @@ bool GetScoreValue(const int shift, double &score)
 int GetSuperTrendDirectionFromHandle(const int handle, const int shift)
 {
    if(handle == INVALID_HANDLE)
+      return 0;
+   if(!IsIndicatorHandleReady(handle, shift + 2))
       return 0;
 
    double direction_value[1];
@@ -1321,9 +1337,15 @@ void ApplySupertrendBasedSL(const bool hedging)
    if(flip_direction == 0)
       return;
 
+   // Backward-compatible override: closeNow=true with target=0.0 means move SL to entry (break-even),
+   // which is a common requested setup for SuperTrend flip protection.
+   bool use_close_now = SupetrendBasedSLCloseNow;
+   if(use_close_now && MathAbs(SupetrendBasedSLTarget) <= 1e-12)
+      use_close_now = false;
+
    if(flip_direction > 0)
    {
-      if(SupetrendBasedSLCloseNow)
+      if(use_close_now)
       {
          if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
             SyncTranchesSell(hedging);
@@ -1340,7 +1362,7 @@ void ApplySupertrendBasedSL(const bool hedging)
    }
    else
    {
-      if(SupetrendBasedSLCloseNow)
+      if(use_close_now)
       {
          if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
             SyncTranchesBuy(hedging);

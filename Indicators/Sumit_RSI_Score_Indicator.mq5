@@ -276,27 +276,17 @@ int OnCalculate(const int rates_total,
    if(rates_total < min_bars)
       return(0);
 
-   int start = (prev_calculated > 0) ? (prev_calculated - 1) : 0;
+   int start = (prev_calculated > 1) ? (prev_calculated - 1) : 0;
    if(start < 0)
       start = 0;
 
-   // Incremental copy logic
-   int to_copy = rates_total - prev_calculated;
-   if(to_copy > 0)
-   {
-      if(prev_calculated > 0) to_copy++; // Overlap one bar for safety
-      
-      double tempBuffer[];
-      // Copy RSI
-      if(CopyBuffer(rsiHandle, 0, 0, to_copy, tempBuffer) == to_copy)
-         ArrayCopy(WorkRsi, tempBuffer, rates_total - to_copy, 0, to_copy);
-      // Copy MA3
-      if(CopyBuffer(ma3Handle, 0, 0, to_copy, tempBuffer) == to_copy)
-         ArrayCopy(WorkMa3, tempBuffer, rates_total - to_copy, 0, to_copy);
-      // Copy MA201
-      if(CopyBuffer(ma201Handle, 0, 0, to_copy, tempBuffer) == to_copy)
-         ArrayCopy(WorkMa201, tempBuffer, rates_total - to_copy, 0, to_copy);
-   }
+   // Deterministic: require complete source data before calculation.
+   if(CopyBuffer(rsiHandle, 0, 0, rates_total, WorkRsi) != rates_total)
+      return(prev_calculated);
+   if(CopyBuffer(ma3Handle, 0, 0, rates_total, WorkMa3) != rates_total)
+      return(prev_calculated);
+   if(CopyBuffer(ma201Handle, 0, 0, rates_total, WorkMa201) != rates_total)
+      return(prev_calculated);
 
    if(prev_calculated == 0)
    {
@@ -314,7 +304,10 @@ int OnCalculate(const int rates_total,
    for(int i = start; i < rates_total; i++)
    {
       Rsi1hBuffer[i] = WorkRsi[i];
-      WorkMomentum[i] = WorkMa3[i] - WorkMa201[i];
+      if(WorkMa3[i] == EMPTY_VALUE || WorkMa201[i] == EMPTY_VALUE)
+         WorkMomentum[i] = EMPTY_VALUE;
+      else
+         WorkMomentum[i] = WorkMa3[i] - WorkMa201[i];
    }
 
    UpdateRsiWilderBuffer(rates_total, prev_calculated, SumitRsiPeriod);

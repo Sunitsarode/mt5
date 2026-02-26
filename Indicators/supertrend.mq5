@@ -100,26 +100,44 @@ int OnCalculate(
     ArraySetAsSeries(high, false);
     ArraySetAsSeries(low, false);
     ArraySetAsSeries(close, false);
-    
-    // Buffer for ATR values
+
+    if(rates_total <= 1)
+        return 0;
+
+    // Pull ATR values once and map by shift for deterministic calculations.
     double atrBuffer[];
     ArraySetAsSeries(atrBuffer, false);
-    
-    // Variables for SuperTrend calculation
-    double srcPrice;          // Source price based on input parameter
-    double highPrice;         // High price (may consider wicks or not)
-    double lowPrice;          // Low price (may consider wicks or not)
-    double atr;               // Current ATR value
-    double longStop;          // Support level (used during uptrend)
-    double longStopPrev;      // Previous support level
-    double shortStop;         // Resistance level (used during downtrend)
-    double shortStopPrev;     // Previous resistance level
-    int supertrend_dir = 1;   // Initial SuperTrend direction (1 = up, -1 = down)
+    int copied = CopyBuffer(atrHandle, 0, 0, rates_total, atrBuffer);
+    if(copied != rates_total)
+        return prev_calculated;
 
-    // Calculate for each bar starting from prev_calculated
-    for(int i = prev_calculated; i < rates_total; i++)
+    int start = (prev_calculated > 1) ? (prev_calculated - 1) : 0;
+    if(start < 0)
+        start = 0;
+
+    // Calculate from oldest->newest bars in non-series indexing.
+    for(int i = start; i < rates_total; i++)
     {
+        double atr = atrBuffer[i];
+        if(atr == EMPTY_VALUE || atr <= 0.0)
+        {
+            if(i == 0)
+            {
+                SuperTrendBuffer[i] = (high[i] + low[i]) * 0.5;
+                SuperTrendDirectionBuffer[i] = 1.0;
+                SuperTrendColorBuffer[i] = 0.0;
+            }
+            else
+            {
+                SuperTrendBuffer[i] = SuperTrendBuffer[i - 1];
+                SuperTrendDirectionBuffer[i] = SuperTrendDirectionBuffer[i - 1];
+                SuperTrendColorBuffer[i] = SuperTrendColorBuffer[i - 1];
+            }
+            continue;
+        }
+
         //--- 1. Calculate source price based on selected price type ---
+        double srcPrice;
         switch(SourcePrice)
         {
             case PRICE_CLOSE:
@@ -146,20 +164,13 @@ int OnCalculate(
         }
 
         //--- 2. Define high and low prices based on "TakeWicksIntoAccount" setting ---
-        highPrice = TakeWicksIntoAccount ? high[i] : close[i];
-        lowPrice = TakeWicksIntoAccount ? low[i] : close[i];
+        double highPrice = TakeWicksIntoAccount ? high[i] : close[i];
+        double lowPrice = TakeWicksIntoAccount ? low[i] : close[i];
 
-        //--- 3. Get ATR value for the current bar ---
-        if(CopyBuffer(atrHandle, 0, rates_total - i - 1, 1, atrBuffer) == -1)
-        {
-            Print("Error copying ATR buffer. Error code: ", GetLastError());
-            // Continue calculation with potentially old ATR value
-        }
-        atr = atrBuffer[0];
-
-        //--- 4. Calculate long stop (support during uptrend) ---
-        longStop = srcPrice - Multiplier * atr;
-        longStopPrev = i > 0 ? SuperTrendBuffer[i - 1] : longStop;
+        //--- 3. Calculate long stop (support during uptrend) ---
+        double longStop = srcPrice - Multiplier * atr;
+        double prevStop = (i > 0 && SuperTrendBuffer[i - 1] != EMPTY_VALUE) ? SuperTrendBuffer[i - 1] : longStop;
+        double longStopPrev = prevStop;
 
         // Adjust long stop based on previous values and current prices
         if(longStop > 0)
@@ -174,9 +185,9 @@ int OnCalculate(
         else
             longStop = longStopPrev;
 
-        //--- 5. Calculate short stop (resistance during downtrend) ---
-        shortStop = srcPrice + Multiplier * atr;
-        shortStopPrev = i > 0 ? SuperTrendBuffer[i - 1] : shortStop;
+        //--- 4. Calculate short stop (resistance during downtrend) ---
+        double shortStop = srcPrice + Multiplier * atr;
+        double shortStopPrev = prevStop;
 
         // Adjust short stop based on previous values and current prices
         if(shortStop > 0)
@@ -191,21 +202,19 @@ int OnCalculate(
         else
             shortStop = shortStopPrev;
 
-        //--- 6. Determine SuperTrend direction based on price crossing stops ---
-        if(i > 0)
-        {
-            // Get previous direction
-            supertrend_dir = (i > 1) ? (int)SuperTrendDirectionBuffer[i-1] : 1;
-            
-            // Change from down to up if price breaks above the short stop
-            if(supertrend_dir == -1 && highPrice > shortStopPrev)
-                supertrend_dir = 1;
-            // Change from up to down if price breaks below the long stop
-            else if(supertrend_dir == 1 && lowPrice < longStopPrev)
-                supertrend_dir = -1;
-        }
+        //--- 5. Determine SuperTrend direction based on price crossing stops ---
+        int supertrend_dir = 1;
+        if(i > 0 && SuperTrendDirectionBuffer[i - 1] != EMPTY_VALUE)
+            supertrend_dir = (int)SuperTrendDirectionBuffer[i - 1];
 
-        //--- 7. Set SuperTrend values based on the direction ---
+        // Change from down to up if price breaks above the short stop
+        if(supertrend_dir == -1 && highPrice > shortStopPrev)
+            supertrend_dir = 1;
+        // Change from up to down if price breaks below the long stop
+        else if(supertrend_dir == 1 && lowPrice < longStopPrev)
+            supertrend_dir = -1;
+
+        //--- 6. Set SuperTrend values based on the direction ---
         if(supertrend_dir == 1)
         {
             // Uptrend - use long stop as SuperTrend value
@@ -221,9 +230,8 @@ int OnCalculate(
             SuperTrendColorBuffer[i] = 1;  // Red color for downtrend
         }
     }
-    
-    //--- Return value of prev_calculated for next call
-    return(rates_total-1);
+
+    return rates_total;
 }
 //+------------------------------------------------------------------+
 //|                      MIT License                                 |
