@@ -82,6 +82,7 @@ struct Tranche
    int      seq;
    ulong    ticket;       // Position ticket for hedging (0 for netting)
    datetime time_open;
+   long     time_open_msc;
    double   entry_price;
    double   volume;
    double   target_price;
@@ -378,15 +379,33 @@ void UpdateLastEntryFromOpenBuy()
 {
    buy_last_entry_price_open = 0.0;
    buy_last_entry_lot = 0.0;
-   datetime last_time = 0;
+   long last_time_msc = -1;
+   ulong last_ticket = 0;
+   int last_seq = -1;
    int total = ArraySize(buy_tranches);
    for(int i = 0; i < total; i++)
    {
       if(buy_tranches[i].closed)
          continue;
-      if(buy_tranches[i].time_open >= last_time)
+
+      bool newer = false;
+      if(buy_tranches[i].time_open_msc > last_time_msc)
       {
-         last_time = buy_tranches[i].time_open;
+         newer = true;
+      }
+      else if(buy_tranches[i].time_open_msc == last_time_msc)
+      {
+         if(buy_tranches[i].ticket > last_ticket)
+            newer = true;
+         else if(buy_tranches[i].ticket == last_ticket && buy_tranches[i].seq > last_seq)
+            newer = true;
+      }
+
+      if(newer)
+      {
+         last_time_msc = buy_tranches[i].time_open_msc;
+         last_ticket = buy_tranches[i].ticket;
+         last_seq = buy_tranches[i].seq;
          buy_last_entry_price_open = buy_tranches[i].entry_price;
          buy_last_entry_lot = buy_tranches[i].volume;
       }
@@ -528,6 +547,9 @@ void RebuildTranchesFromPositionsBuy(const bool hedging)
       t.seq = ++buy_next_seq;
       t.ticket = hedging ? (ulong)PositionGetInteger(POSITION_TICKET) : 0;
       t.time_open = (datetime)PositionGetInteger(POSITION_TIME);
+      t.time_open_msc = (long)PositionGetInteger(POSITION_TIME_MSC);
+      if(t.time_open_msc <= 0)
+         t.time_open_msc = ((long)t.time_open) * 1000;
       t.entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
       t.volume = PositionGetDouble(POSITION_VOLUME);
       double broker_tp = PositionGetDouble(POSITION_TP);
@@ -545,12 +567,21 @@ void RebuildTranchesFromPositionsBuy(const bool hedging)
       buy_last_entry_price_ref = buy_last_entry_price_open;
 }
 
-bool AddTrancheBuy(const double entry_price, const double volume, const ulong ticket, const double target_price = 0.0)
+bool AddTrancheBuy(const double entry_price, const double volume, const ulong ticket, const double target_price = 0.0, const long time_open_msc = 0)
 {
    Tranche t;
    t.seq = ++buy_next_seq;
    t.ticket = ticket;
-   t.time_open = TimeCurrent();
+   if(time_open_msc > 0)
+   {
+      t.time_open_msc = time_open_msc;
+      t.time_open = (datetime)(time_open_msc / 1000);
+   }
+   else
+   {
+      t.time_open = TimeCurrent();
+      t.time_open_msc = ((long)t.time_open) * 1000;
+   }
    t.entry_price = entry_price;
    t.volume = volume;
    t.target_price = (target_price > 0.0) ? target_price : CalculateTargetPriceBuy(entry_price);
@@ -671,11 +702,19 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
       entry_price = price;
 
    ulong ticket = 0;
+   ulong deal = trade.ResultDeal();
+   long deal_time_msc = 0;
    if(hedging)
    {
-      ulong deal = trade.ResultDeal();
       if(deal > 0 && HistoryDealSelect(deal))
+      {
          ticket = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+         deal_time_msc = (long)HistoryDealGetInteger(deal, DEAL_TIME_MSC);
+      }
+   }
+   else if(deal > 0 && HistoryDealSelect(deal))
+   {
+      deal_time_msc = (long)HistoryDealGetInteger(deal, DEAL_TIME_MSC);
    }
 
    double tranche_target = CalculateTargetPriceBuy(entry_price);
@@ -710,7 +749,7 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
       }
    }
 
-   AddTrancheBuy(entry_price, vol, ticket, tranche_target);
+   AddTrancheBuy(entry_price, vol, ticket, tranche_target, deal_time_msc);
    return true;
 }
 
@@ -733,15 +772,33 @@ void UpdateLastEntryFromOpenSell()
 {
    sell_last_entry_price_open = 0.0;
    sell_last_entry_lot = 0.0;
-   datetime last_time = 0;
+   long last_time_msc = -1;
+   ulong last_ticket = 0;
+   int last_seq = -1;
    int total = ArraySize(sell_tranches);
    for(int i = 0; i < total; i++)
    {
       if(sell_tranches[i].closed)
          continue;
-      if(sell_tranches[i].time_open >= last_time)
+
+      bool newer = false;
+      if(sell_tranches[i].time_open_msc > last_time_msc)
       {
-         last_time = sell_tranches[i].time_open;
+         newer = true;
+      }
+      else if(sell_tranches[i].time_open_msc == last_time_msc)
+      {
+         if(sell_tranches[i].ticket > last_ticket)
+            newer = true;
+         else if(sell_tranches[i].ticket == last_ticket && sell_tranches[i].seq > last_seq)
+            newer = true;
+      }
+
+      if(newer)
+      {
+         last_time_msc = sell_tranches[i].time_open_msc;
+         last_ticket = sell_tranches[i].ticket;
+         last_seq = sell_tranches[i].seq;
          sell_last_entry_price_open = sell_tranches[i].entry_price;
          sell_last_entry_lot = sell_tranches[i].volume;
       }
@@ -883,6 +940,9 @@ void RebuildTranchesFromPositionsSell(const bool hedging)
       t.seq = ++sell_next_seq;
       t.ticket = hedging ? (ulong)PositionGetInteger(POSITION_TICKET) : 0;
       t.time_open = (datetime)PositionGetInteger(POSITION_TIME);
+      t.time_open_msc = (long)PositionGetInteger(POSITION_TIME_MSC);
+      if(t.time_open_msc <= 0)
+         t.time_open_msc = ((long)t.time_open) * 1000;
       t.entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
       t.volume = PositionGetDouble(POSITION_VOLUME);
       double broker_tp = PositionGetDouble(POSITION_TP);
@@ -900,12 +960,21 @@ void RebuildTranchesFromPositionsSell(const bool hedging)
       sell_last_entry_price_ref = sell_last_entry_price_open;
 }
 
-bool AddTrancheSell(const double entry_price, const double volume, const ulong ticket, const double target_price = 0.0)
+bool AddTrancheSell(const double entry_price, const double volume, const ulong ticket, const double target_price = 0.0, const long time_open_msc = 0)
 {
    Tranche t;
    t.seq = ++sell_next_seq;
    t.ticket = ticket;
-   t.time_open = TimeCurrent();
+   if(time_open_msc > 0)
+   {
+      t.time_open_msc = time_open_msc;
+      t.time_open = (datetime)(time_open_msc / 1000);
+   }
+   else
+   {
+      t.time_open = TimeCurrent();
+      t.time_open_msc = ((long)t.time_open) * 1000;
+   }
    t.entry_price = entry_price;
    t.volume = volume;
    t.target_price = (target_price > 0.0) ? target_price : CalculateTargetPriceSell(entry_price);
@@ -1026,11 +1095,19 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
       entry_price = price;
 
    ulong ticket = 0;
+   ulong deal = trade.ResultDeal();
+   long deal_time_msc = 0;
    if(hedging)
    {
-      ulong deal = trade.ResultDeal();
       if(deal > 0 && HistoryDealSelect(deal))
+      {
          ticket = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+         deal_time_msc = (long)HistoryDealGetInteger(deal, DEAL_TIME_MSC);
+      }
+   }
+   else if(deal > 0 && HistoryDealSelect(deal))
+   {
+      deal_time_msc = (long)HistoryDealGetInteger(deal, DEAL_TIME_MSC);
    }
 
    double tranche_target = CalculateTargetPriceSell(entry_price);
@@ -1065,7 +1142,7 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
       }
    }
 
-   AddTrancheSell(entry_price, vol, ticket, tranche_target);
+   AddTrancheSell(entry_price, vol, ticket, tranche_target, deal_time_msc);
    return true;
 }
 
@@ -1387,6 +1464,29 @@ int OnInit()
    trade.SetExpertMagicNumber(BuyMagicNumber);
    trade.SetDeviationInPoints(Deviation);
 
+   bool hedging = IsHedging();
+   int margin_mode = (int)AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+   int leverage = (int)AccountInfoInteger(ACCOUNT_LEVERAGE);
+   bool tester_mode = (MQLInfoInteger(MQL_TESTER) != 0);
+   bool visual_mode = (MQLInfoInteger(MQL_VISUAL_MODE) != 0);
+   PrintFormat("Environment: hedging=%s marginMode=%d leverage=%d tester=%s visual=%s",
+               hedging ? "true" : "false",
+               margin_mode,
+               leverage,
+               tester_mode ? "true" : "false",
+               visual_mode ? "true" : "false");
+
+   if(BuyEntry && SellEntry && !hedging)
+   {
+      Print("Invalid configuration: dual-side mode needs hedging account. Disable one side or use a hedging account.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   if(UseNewBar && (!SetTargetWithEntry || TrailingTargetPips > 0.0 || SupetrendBasedSL))
+   {
+      Print("Modeling warning: entries are new-bar based but exits/protection are tick-based. Use 'Every tick based on real ticks' for stable tester comparisons.");
+   }
+
    g_vol_min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
    g_vol_max = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
    g_vol_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
@@ -1485,7 +1585,6 @@ int OnInit()
 
    if(RecoverExistingMagicPositions)
    {
-      bool hedging = IsHedging();
       EnsureServerTargetsForOpenPositionsBuy(hedging);
       EnsureServerTargetsForOpenPositionsSell(hedging);
       RebuildTranchesFromPositionsBuy(hedging);
