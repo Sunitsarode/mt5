@@ -126,8 +126,32 @@ double ST2DirBuffer[];
 int rsiHandle = INVALID_HANDLE;
 int ma3Handle = INVALID_HANDLE;
 int ma201Handle = INVALID_HANDLE;
-int supertrend1Handle = INVALID_HANDLE;
-int supertrend2Handle = INVALID_HANDLE;
+int st1AtrHandle = INVALID_HANDLE;
+int st2AtrHandle = INVALID_HANDLE;
+bool g_st1_enabled = false;
+bool g_st2_enabled = false;
+
+bool CopyBufferAligned(const int handle, const int buffer_num, const int rates_total, double &dst[])
+{
+   double tmp[];
+   ArraySetAsSeries(tmp, false);
+   int copied = CopyBuffer(handle, buffer_num, 0, rates_total, tmp);
+   if(copied <= 0)
+      return false;
+
+   int offset = rates_total - copied;
+   if(offset < 0)
+      offset = 0;
+
+   for(int i = 0; i < offset; i++)
+      dst[i] = EMPTY_VALUE;
+
+   int limit = MathMin(copied, rates_total - offset);
+   for(int i = 0; i < limit; i++)
+      dst[offset + i] = tmp[i];
+
+   return true;
+}
 
 double ClampScore(const double value)
 {
@@ -264,8 +288,30 @@ void UpdateRsiWilderBuffer(const int rates_total, const int prev_calculated, con
    }
 }
 
-bool FillSuperTrendMappedScores(const int handle,
+double SelectSourcePrice(const double openv,
+                         const double highv,
+                         const double lowv,
+                         const double closev,
+                         const ENUM_APPLIED_PRICE mode)
+{
+   switch(mode)
+   {
+      case PRICE_CLOSE:   return closev;
+      case PRICE_OPEN:    return openv;
+      case PRICE_HIGH:    return highv;
+      case PRICE_LOW:     return lowv;
+      case PRICE_MEDIAN:  return (highv + lowv) * 0.5;
+      case PRICE_TYPICAL: return (highv + lowv + closev) / 3.0;
+      default:            return (highv + lowv + closev + closev) * 0.25; // PRICE_WEIGHTED
+   }
+}
+
+bool FillSuperTrendMappedScores(const int atr_handle,
                                 const ENUM_TIMEFRAMES timeframe,
+                                const int atr_period,
+                                const double multiplier,
+                                const ENUM_APPLIED_PRICE source_mode,
+                                const bool take_wicks,
                                 const datetime &base_time[],
                                 const int rates_total,
                                 const int start,
@@ -275,66 +321,116 @@ bool FillSuperTrendMappedScores(const int handle,
                                 double &mapped_score_buffer[],
                                 double &dir_buffer[])
 {
-   if(handle == INVALID_HANDLE)
-      return false;
-   if(rates_total <= 0)
+   if(atr_handle == INVALID_HANDLE || rates_total <= 0)
       return false;
 
-   int tf_sec = PeriodSeconds(timeframe);
-   if(tf_sec <= 0)
-      tf_sec = PeriodSeconds(PERIOD_CURRENT);
-   if(tf_sec <= 0)
-      tf_sec = 60;
+   int tf_bars = Bars(_Symbol, timeframe);
+   if(tf_bars <= atr_period + 2)
+      return false;
 
-   datetime from_time = base_time[0] - (datetime)(2 * tf_sec);
-   datetime to_time = base_time[rates_total - 1];
+   int request = MathMin(tf_bars, rates_total + 4096);
+   if(request <= atr_period + 2)
+      return false;
 
-   datetime st_time[];
+   datetime tf_time[];
+   double tf_open[], tf_high[], tf_low[], tf_close[], tf_atr[];
+   ArraySetAsSeries(tf_time, true);
+   ArraySetAsSeries(tf_open, true);
+   ArraySetAsSeries(tf_high, true);
+   ArraySetAsSeries(tf_low, true);
+   ArraySetAsSeries(tf_close, true);
+   ArraySetAsSeries(tf_atr, true);
+
+   int c_time = CopyTime(_Symbol, timeframe, 0, request, tf_time);
+   int c_open = CopyOpen(_Symbol, timeframe, 0, request, tf_open);
+   int c_high = CopyHigh(_Symbol, timeframe, 0, request, tf_high);
+   int c_low = CopyLow(_Symbol, timeframe, 0, request, tf_low);
+   int c_close = CopyClose(_Symbol, timeframe, 0, request, tf_close);
+   int c_atr = CopyBuffer(atr_handle, 0, 0, request, tf_atr);
+
+   int copied = MathMin(MathMin(MathMin(c_time, c_open), MathMin(c_high, c_low)), MathMin(c_close, c_atr));
+   if(copied <= atr_period + 2)
+      return false;
+
+   double st_line[];
    double st_dir[];
-   ArraySetAsSeries(st_time, false);
-   ArraySetAsSeries(st_dir, false);
+   ArrayResize(st_line, copied);
+   ArrayResize(st_dir, copied);
+   ArraySetAsSeries(st_line, true);
+   ArraySetAsSeries(st_dir, true);
 
-   int copied_time = CopyTime(_Symbol, timeframe, from_time, to_time, st_time);
-   int copied_dir = CopyBuffer(handle, 2, from_time, to_time, st_dir);
-   if(copied_time <= 0 || copied_dir <= 0)
-      return false;
-
-   int count = MathMin(copied_time, copied_dir);
-   if(count <= 0)
-      return false;
-
-   // Defensive: enforce ascending time order for deterministic pointer mapping.
-   if(count > 1 && st_time[0] > st_time[count - 1])
+   for(int i = copied - 1; i >= 0; i--)
    {
-      for(int l = 0, r = count - 1; l < r; l++, r--)
+      double atr = tf_atr[i];
+      double openv = tf_open[i];
+      double highv = tf_high[i];
+      double lowv = tf_low[i];
+      double closev = tf_close[i];
+
+      if(atr == EMPTY_VALUE || atr <= 0.0)
       {
-         datetime t = st_time[l];
-         st_time[l] = st_time[r];
-         st_time[r] = t;
-
-         double v = st_dir[l];
-         st_dir[l] = st_dir[r];
-         st_dir[r] = v;
+         if(i == copied - 1)
+         {
+            st_line[i] = (highv + lowv) * 0.5;
+            st_dir[i] = 1.0;
+         }
+         else
+         {
+            st_line[i] = st_line[i + 1];
+            st_dir[i] = st_dir[i + 1];
+         }
+         continue;
       }
-   }
 
-   int j = 0;
-   while(j + 1 < count && st_time[j + 1] <= base_time[start])
-      j++;
+      double src = SelectSourcePrice(openv, highv, lowv, closev, source_mode);
+      double high_price = take_wicks ? highv : closev;
+      double low_price = take_wicks ? lowv : closev;
+
+      double long_stop = src - (multiplier * atr);
+      double prev_stop = (i < copied - 1 && st_line[i + 1] != EMPTY_VALUE) ? st_line[i + 1] : long_stop;
+      double long_prev = prev_stop;
+
+      if(long_stop > 0.0)
+      {
+         if(openv == closev && openv == lowv && openv == highv)
+            long_stop = long_prev;
+         else
+            long_stop = (low_price > long_prev) ? MathMax(long_stop, long_prev) : long_stop;
+      }
+      else
+         long_stop = long_prev;
+
+      double short_stop = src + (multiplier * atr);
+      double short_prev = prev_stop;
+      if(short_stop > 0.0)
+      {
+         if(openv == closev && openv == lowv && openv == highv)
+            short_stop = short_prev;
+         else
+            short_stop = (high_price < short_prev) ? MathMin(short_stop, short_prev) : short_stop;
+      }
+      else
+         short_stop = short_prev;
+
+      int dir = 1;
+      if(i < copied - 1 && st_dir[i + 1] != EMPTY_VALUE)
+         dir = (int)st_dir[i + 1];
+
+      if(dir == -1 && high_price > short_prev)
+         dir = 1;
+      else if(dir == 1 && low_price < long_prev)
+         dir = -1;
+
+      st_dir[i] = (double)dir;
+      st_line[i] = (dir == 1) ? long_stop : short_stop;
+   }
 
    for(int i = start; i < rates_total; i++)
    {
-      while(j + 1 < count && st_time[j + 1] <= base_time[i])
-         j++;
-
       int dir = 0;
-      if(st_time[j] <= base_time[i] && st_dir[j] != EMPTY_VALUE)
-      {
-         if(st_dir[j] > 0.0)
-            dir = 1;
-         else if(st_dir[j] < 0.0)
-            dir = -1;
-      }
+      int shift = iBarShift(_Symbol, timeframe, base_time[i], false);
+      if(shift >= 0 && shift < copied && st_dir[shift] != EMPTY_VALUE)
+         dir = (int)st_dir[shift];
 
       dir_buffer[i] = dir;
       mapped_score_buffer[i] = DirectionToScore(dir, bull_score, bear_score, neutral_score);
@@ -389,10 +485,10 @@ int OnInit()
    PlotIndexSetInteger(1, PLOT_DRAW_BEGIN, signal3_begin);
    PlotIndexSetInteger(2, PLOT_DRAW_BEGIN, signal11_begin);
    PlotIndexSetInteger(3, PLOT_DRAW_BEGIN, Rsi1hPeriod);
-   PlotIndexSetInteger(4, PLOT_DRAW_BEGIN, score_begin);
+   PlotIndexSetInteger(4, PLOT_DRAW_BEGIN, 0);
    PlotIndexSetInteger(5, PLOT_DRAW_BEGIN, 0);
    PlotIndexSetInteger(6, PLOT_DRAW_BEGIN, 0);
-   PlotIndexSetInteger(7, PLOT_DRAW_BEGIN, score_begin);
+   PlotIndexSetInteger(7, PLOT_DRAW_BEGIN, 0);
 
    rsiHandle = iRSI(_Symbol, PERIOD_CURRENT, Rsi1hPeriod, PRICE_CLOSE);
    if(rsiHandle == INVALID_HANDLE)
@@ -409,35 +505,28 @@ int OnInit()
       return(INIT_FAILED);
    }
 
-   if(UseSuperTrend1)
+   g_st1_enabled = UseSuperTrend1;
+   g_st2_enabled = UseSuperTrend2;
+
+   if(g_st1_enabled)
    {
-      supertrend1Handle = iCustom(_Symbol,
-                                  ST1Timeframe,
-                                  "supertrend",
-                                  ST1AtrP,
-                                  ST1Mult,
-                                  SupertrendSourcePrice,
-                                  SupertrendTakeWicksIntoAccount);
-      if(supertrend1Handle == INVALID_HANDLE)
+      st1AtrHandle = iATR(_Symbol, ST1Timeframe, ST1AtrP);
+      if(st1AtrHandle == INVALID_HANDLE)
       {
-         PrintFormat("Failed to create ST1 handle (%s). err=%d", EnumToString(ST1Timeframe), GetLastError());
-         return(INIT_FAILED);
+         PrintFormat("Warning: ST1 ATR handle unavailable (%s). Falling back to neutral ST1 score. err=%d",
+                     EnumToString(ST1Timeframe), GetLastError());
+         g_st1_enabled = false;
       }
    }
 
-   if(UseSuperTrend2)
+   if(g_st2_enabled)
    {
-      supertrend2Handle = iCustom(_Symbol,
-                                  ST2Timeframe,
-                                  "supertrend",
-                                  ST2AtrP,
-                                  ST2Mult,
-                                  SupertrendSourcePrice,
-                                  SupertrendTakeWicksIntoAccount);
-      if(supertrend2Handle == INVALID_HANDLE)
+      st2AtrHandle = iATR(_Symbol, ST2Timeframe, ST2AtrP);
+      if(st2AtrHandle == INVALID_HANDLE)
       {
-         PrintFormat("Failed to create ST2 handle (%s). err=%d", EnumToString(ST2Timeframe), GetLastError());
-         return(INIT_FAILED);
+         PrintFormat("Warning: ST2 ATR handle unavailable (%s). Falling back to neutral ST2 score. err=%d",
+                     EnumToString(ST2Timeframe), GetLastError());
+         g_st2_enabled = false;
       }
    }
 
@@ -460,24 +549,34 @@ int OnCalculate(const int rates_total,
    ArraySetAsSeries(time, false);
 
    int min_bars = MathMax(250, SumitSma201Period + SumitRsiPeriod + 11);
-   if(UseSuperTrend1)
+   if(g_st1_enabled)
       min_bars = MathMax(min_bars, ST1AtrP + 5);
-   if(UseSuperTrend2)
+   if(g_st2_enabled)
       min_bars = MathMax(min_bars, ST2AtrP + 5);
 
    if(rates_total < min_bars)
-      return(0);
+   {
+      for(int i = 0; i < rates_total; i++)
+      {
+         SumitRsiBuffer[i] = EMPTY_VALUE;
+         SignalMa3Buffer[i] = EMPTY_VALUE;
+         SignalMa11Buffer[i] = EMPTY_VALUE;
+         Rsi1hBuffer[i] = 50.0;
+         SumitRawScoreBuffer[i] = 50.0;
+         ST1ScoreBuffer[i] = ClampScore(ST1NeutralScore);
+         ST2ScoreBuffer[i] = ClampScore(ST2NeutralScore);
+         FinalScoreBuffer[i] = 50.0;
+      }
+      return(rates_total);
+   }
 
    int start = (prev_calculated > 1) ? (prev_calculated - 1) : 0;
    if(start < 0)
       start = 0;
 
-   if(CopyBuffer(rsiHandle, 0, 0, rates_total, WorkRsi) != rates_total)
-      return(prev_calculated);
-   if(CopyBuffer(ma3Handle, 0, 0, rates_total, WorkMa3) != rates_total)
-      return(prev_calculated);
-   if(CopyBuffer(ma201Handle, 0, 0, rates_total, WorkMa201) != rates_total)
-      return(prev_calculated);
+   bool rsi_ok = CopyBufferAligned(rsiHandle, 0, rates_total, WorkRsi);
+   bool ma3_ok = CopyBufferAligned(ma3Handle, 0, rates_total, WorkMa3);
+   bool ma201_ok = CopyBufferAligned(ma201Handle, 0, rates_total, WorkMa201);
 
    if(prev_calculated == 0)
    {
@@ -487,10 +586,10 @@ int OnCalculate(const int rates_total,
          SignalMa3Buffer[i] = EMPTY_VALUE;
          SignalMa11Buffer[i] = EMPTY_VALUE;
          Rsi1hBuffer[i] = EMPTY_VALUE;
-         FinalScoreBuffer[i] = EMPTY_VALUE;
-         ST1ScoreBuffer[i] = EMPTY_VALUE;
-         ST2ScoreBuffer[i] = EMPTY_VALUE;
-         SumitRawScoreBuffer[i] = EMPTY_VALUE;
+         FinalScoreBuffer[i] = 50.0;
+         ST1ScoreBuffer[i] = ClampScore(ST1NeutralScore);
+         ST2ScoreBuffer[i] = ClampScore(ST2NeutralScore);
+         SumitRawScoreBuffer[i] = 50.0;
          AvgGainBuffer[i] = EMPTY_VALUE;
          AvgLossBuffer[i] = EMPTY_VALUE;
          ST1DirBuffer[i] = 0.0;
@@ -500,17 +599,28 @@ int OnCalculate(const int rates_total,
 
    for(int i = start; i < rates_total; i++)
    {
-      Rsi1hBuffer[i] = WorkRsi[i];
-      if(WorkMa3[i] == EMPTY_VALUE || WorkMa201[i] == EMPTY_VALUE)
+      Rsi1hBuffer[i] = rsi_ok ? WorkRsi[i] : 50.0;
+      if(!ma3_ok || !ma201_ok || WorkMa3[i] == EMPTY_VALUE || WorkMa201[i] == EMPTY_VALUE)
          WorkMomentum[i] = EMPTY_VALUE;
       else
          WorkMomentum[i] = WorkMa3[i] - WorkMa201[i];
    }
 
-   UpdateRsiWilderBuffer(rates_total, prev_calculated, SumitRsiPeriod);
-
-   SimpleMAOnBuffer(rates_total, prev_calculated, SumitRsiPeriod, 3, SumitRsiBuffer, SignalMa3Buffer);
-   SimpleMAOnBuffer(rates_total, prev_calculated, SumitRsiPeriod, 11, SumitRsiBuffer, SignalMa11Buffer);
+   if(ma3_ok && ma201_ok)
+   {
+      UpdateRsiWilderBuffer(rates_total, prev_calculated, SumitRsiPeriod);
+      SimpleMAOnBuffer(rates_total, prev_calculated, SumitRsiPeriod, 3, SumitRsiBuffer, SignalMa3Buffer);
+      SimpleMAOnBuffer(rates_total, prev_calculated, SumitRsiPeriod, 11, SumitRsiBuffer, SignalMa11Buffer);
+   }
+   else
+   {
+      for(int i = start; i < rates_total; i++)
+      {
+         SumitRsiBuffer[i] = EMPTY_VALUE;
+         SignalMa3Buffer[i] = EMPTY_VALUE;
+         SignalMa11Buffer[i] = EMPTY_VALUE;
+      }
+   }
 
    int score_begin = SumitSma201Period + SumitRsiPeriod + 11 - 1;
    int score_start = MathMax(start, score_begin);
@@ -520,12 +630,13 @@ int OnCalculate(const int rates_total,
 
    for(int i = score_start; i < rates_total && !IsStopped(); i++)
    {
-      if(SumitRsiBuffer[i] == EMPTY_VALUE ||
+      if(!rsi_ok || !ma3_ok || !ma201_ok ||
+         SumitRsiBuffer[i] == EMPTY_VALUE ||
          SignalMa3Buffer[i] == EMPTY_VALUE ||
          SignalMa11Buffer[i] == EMPTY_VALUE ||
          Rsi1hBuffer[i] == EMPTY_VALUE)
       {
-         SumitRawScoreBuffer[i] = EMPTY_VALUE;
+         SumitRawScoreBuffer[i] = 50.0;
          continue;
       }
 
@@ -542,10 +653,14 @@ int OnCalculate(const int rates_total,
       SumitRawScoreBuffer[i] = ClampScore((double)score);
    }
 
-   if(UseSuperTrend1)
+   if(g_st1_enabled && st1AtrHandle != INVALID_HANDLE && BarsCalculated(st1AtrHandle) > 0)
    {
-      if(!FillSuperTrendMappedScores(supertrend1Handle,
+      if(!FillSuperTrendMappedScores(st1AtrHandle,
                                      ST1Timeframe,
+                                     ST1AtrP,
+                                     ST1Mult,
+                                     SupertrendSourcePrice,
+                                     SupertrendTakeWicksIntoAccount,
                                      time,
                                      rates_total,
                                      start,
@@ -555,7 +670,11 @@ int OnCalculate(const int rates_total,
                                      ST1ScoreBuffer,
                                      ST1DirBuffer))
       {
-         return(prev_calculated);
+         for(int i = start; i < rates_total; i++)
+         {
+            ST1ScoreBuffer[i] = ClampScore(ST1NeutralScore);
+            ST1DirBuffer[i] = 0.0;
+         }
       }
    }
    else
@@ -567,10 +686,14 @@ int OnCalculate(const int rates_total,
       }
    }
 
-   if(UseSuperTrend2)
+   if(g_st2_enabled && st2AtrHandle != INVALID_HANDLE && BarsCalculated(st2AtrHandle) > 0)
    {
-      if(!FillSuperTrendMappedScores(supertrend2Handle,
+      if(!FillSuperTrendMappedScores(st2AtrHandle,
                                      ST2Timeframe,
+                                     ST2AtrP,
+                                     ST2Mult,
+                                     SupertrendSourcePrice,
+                                     SupertrendTakeWicksIntoAccount,
                                      time,
                                      rates_total,
                                      start,
@@ -580,7 +703,11 @@ int OnCalculate(const int rates_total,
                                      ST2ScoreBuffer,
                                      ST2DirBuffer))
       {
-         return(prev_calculated);
+         for(int i = start; i < rates_total; i++)
+         {
+            ST2ScoreBuffer[i] = ClampScore(ST2NeutralScore);
+            ST2DirBuffer[i] = 0.0;
+         }
       }
    }
    else
@@ -593,8 +720,8 @@ int OnCalculate(const int rates_total,
    }
 
    double w_sumit = NormalizeWeight(WeightSumit);
-   double w_st1 = UseSuperTrend1 ? NormalizeWeight(WeightST1) : 0.0;
-   double w_st2 = UseSuperTrend2 ? NormalizeWeight(WeightST2) : 0.0;
+   double w_st1 = g_st1_enabled ? NormalizeWeight(WeightST1) : 0.0;
+   double w_st2 = g_st2_enabled ? NormalizeWeight(WeightST2) : 0.0;
    double w_total = w_sumit + w_st1 + w_st2;
    if(w_total <= 0.0)
    {
@@ -633,9 +760,9 @@ void OnDeinit(const int reason)
       IndicatorRelease(ma3Handle);
    if(ma201Handle != INVALID_HANDLE)
       IndicatorRelease(ma201Handle);
-   if(supertrend1Handle != INVALID_HANDLE)
-      IndicatorRelease(supertrend1Handle);
-   if(supertrend2Handle != INVALID_HANDLE)
-      IndicatorRelease(supertrend2Handle);
+   if(st1AtrHandle != INVALID_HANDLE)
+      IndicatorRelease(st1AtrHandle);
+   if(st2AtrHandle != INVALID_HANDLE)
+      IndicatorRelease(st2AtrHandle);
 }
 //+------------------------------------------------------------------+
