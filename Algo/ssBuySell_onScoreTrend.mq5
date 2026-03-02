@@ -1,6 +1,6 @@
 //+---------------------ssBuySell_Magic_HLentry_2_SStarget.mq5------------------------------------+
 //|
-//   Combined Buy + Sell strategy with score-based entry and score/cross exits                    |
+//   Combined Buy + Sell strategy with score + Sumit/Signal threshold entry/exit                  |
 //| Uses external indicators: Sumit_RSI_Score_Indicator + optional SuperTrend filter              |
 //
 //+------------------------------------------------------------------+
@@ -23,11 +23,18 @@ input int SumitRsiPeriod = 7;
 // Side enable + score threshold
 input bool BuyEntry = true;
 input bool SellEntry = true;
-input int EntryScoreBuy = 10;   // Buy condition: score <= threshold
-input int EntryScoreSell = 60;  // Sell condition: score >= threshold
-input int ExitScoreBuy = 50;   // 0=disabled, close BUY when score >= target
-input int ExitScoreSell = 50;  // 0=disabled, close SELL when score <= target
-input int OnCross_SumitRSI_SignalMA3 = 0; // 0=disabled, 1=enable SumitRSI/SignalMA3 cross logic
+input int BUYEntryScore = 10;   // Buy condition: score <= threshold
+input int BUYExitScore = 60;   // 0=disabled, close BUY when score >= target
+input int SELLEntryScore = 90;  // Sell condition: score >= threshold
+input int SELLExitScore = 40;  // 0=disabled, close SELL when score <= target
+input int BUYEntrySumitRSI = 20;    // 0=disabled, BUY entry when SumitRSI <= level
+input int BUYExitSumitRSI = 60;     // 0=disabled, BUY exit when SumitRSI >= level
+input int BUYEntrySignalMA3 = 20;   // 0=disabled, BUY entry when SignalMA3 <= level
+input int BUYExitSignalMA3 = 60;    // 0=disabled, BUY exit when SignalMA3 >= level
+input int SELLEntrySumitRSI = 60;   // 0=disabled, SELL entry when SumitRSI >= level
+input int SELLExitSumitRSI = 20;    // 0=disabled, SELL exit when SumitRSI <= level
+input int SELLEntrySignalMA3 = 60;  // 0=disabled, SELL entry when SignalMA3 >= level
+input int SELLExitSignalMA3 = 20;   // 0=disabled, SELL exit when SignalMA3 <= level
 
 // SuperTrend filter (runtime-selectable timeframe)
 input bool UseSuperTrend = true;
@@ -219,11 +226,6 @@ int NormalizeScoreLevel(const int level)
    return level;
 }
 
-bool IsCrossSignalEnabled()
-{
-   return (OnCross_SumitRSI_SignalMA3 == 1);
-}
-
 bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &value)
 {
    if(sumitScoreHandle == INVALID_HANDLE)
@@ -238,35 +240,6 @@ bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &val
 
    value = indicator_value[0];
    return true;
-}
-
-int GetSumitRsiSignalMA3CrossEventDirection()
-{
-   if(!IsCrossSignalEnabled())
-      return 0;
-
-   int curr_shift = UseNewBar ? 1 : 0;
-   int prev_shift = curr_shift + 1;
-
-   double sumit_curr = 0.0;
-   double signal_curr = 0.0;
-   double sumit_prev = 0.0;
-   double signal_prev = 0.0;
-
-   if(!GetSumitIndicatorValue(0, curr_shift, sumit_curr) || !GetSumitIndicatorValue(1, curr_shift, signal_curr))
-      return 0;
-   if(!GetSumitIndicatorValue(0, prev_shift, sumit_prev) || !GetSumitIndicatorValue(1, prev_shift, signal_prev))
-      return 0;
-
-   double spread_curr = sumit_curr - signal_curr;
-   double spread_prev = sumit_prev - signal_prev;
-
-   if(spread_prev <= 0.0 && spread_curr > 0.0)
-      return 1;  // BUY signal
-   if(spread_prev >= 0.0 && spread_curr < 0.0)
-      return -1; // SELL signal
-
-   return 0;
 }
 
 int GetSuperTrendDirection(const int shift)
@@ -1069,23 +1042,24 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 //+------------------------------------------------------------------+
 //| Trading flow per side                                            |
 //+------------------------------------------------------------------+
-void ProcessBuy(const bool hedging, const double bid, const double ask, const double score, const int cross_event)
+void ProcessBuy(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3)
 {
    if(!BuyEntry)
       return;
 
    if(UseSuperTrend && !IsSuperTrendBullishH1(1))
       return;
-   if(IsCrossSignalEnabled() && cross_event <= 0)
-      return;
 
    int openCount = OpenTrancheCountBuy();
-   int scoreTrigger = NormalizeScoreLevel(EntryScoreBuy);
+   int scoreTrigger = NormalizeScoreLevel(BUYEntryScore);
    bool scoreOk = (score <= scoreTrigger);
+   bool sumitOk = (BUYEntrySumitRSI <= 0 || sumit_rsi <= BUYEntrySumitRSI);
+   bool signalOk = (BUYEntrySignalMA3 <= 0 || signal_ma3 <= BUYEntrySignalMA3);
+   bool entryOk = (scoreOk && sumitOk && signalOk);
 
    if(openCount == 0)
    {
-      if(!scoreOk)
+      if(!entryOk)
          return;
 
       if(!IsLastCandleBreakConditionMet(bid, chk_last_candle_breaks_buy, chk_last_candle_type_buy, true))
@@ -1104,7 +1078,7 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
    if(BuyMaxEntries > 0 && openCount >= BuyMaxEntries)
       return;
 
-   if(!scoreOk)
+   if(!entryOk)
       return;
 
    if(!IsLastCandleBreakConditionMet(bid, chk_last_candle_breaks_buy, chk_last_candle_type_buy, true))
@@ -1120,23 +1094,24 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
    }
 }
 
-void ProcessSell(const bool hedging, const double bid, const double ask, const double score, const int cross_event)
+void ProcessSell(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3)
 {
    if(!SellEntry)
       return;
 
    if(UseSuperTrend && !IsSuperTrendBearishH1(1))
       return;
-   if(IsCrossSignalEnabled() && cross_event >= 0)
-      return;
 
    int openCount = OpenTrancheCountSell();
-   int scoreTrigger = NormalizeScoreLevel(EntryScoreSell);
+   int scoreTrigger = NormalizeScoreLevel(SELLEntryScore);
    bool scoreOk = (score >= scoreTrigger);
+   bool sumitOk = (SELLEntrySumitRSI <= 0 || sumit_rsi >= SELLEntrySumitRSI);
+   bool signalOk = (SELLEntrySignalMA3 <= 0 || signal_ma3 >= SELLEntrySignalMA3);
+   bool entryOk = (scoreOk && sumitOk && signalOk);
 
    if(openCount == 0)
    {
-      if(!scoreOk)
+      if(!entryOk)
          return;
 
       if(!IsLastCandleBreakConditionMet(ask, chk_last_candle_breaks_sell, chk_last_candle_type_sell, false))
@@ -1155,7 +1130,7 @@ void ProcessSell(const bool hedging, const double bid, const double ask, const d
    if(SellMaxEntries > 0 && openCount >= SellMaxEntries)
       return;
 
-   if(!scoreOk)
+   if(!entryOk)
       return;
 
    if(!IsLastCandleBreakConditionMet(ask, chk_last_candle_breaks_sell, chk_last_candle_type_sell, false))
@@ -1202,39 +1177,45 @@ int CloseAllManagedPositions(const ulong magic, const int position_type, const s
    return closed_count;
 }
 
-void ApplyScoreAndCrossExits(const bool hedging, const double score, const int cross_event)
+void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const double sumit_rsi, const double signal_ma3)
 {
-   int buy_target = NormalizeScoreLevel(ExitScoreBuy);
-   int sell_target = NormalizeScoreLevel(ExitScoreSell);
+   int buy_target = NormalizeScoreLevel(BUYExitScore);
+   int sell_target = NormalizeScoreLevel(SELLExitScore);
 
-   bool close_buys_by_target = (ExitScoreBuy > 0 && score >= buy_target);
-   bool close_buys_by_cross = (IsCrossSignalEnabled() && cross_event < 0);
-   bool close_sells_by_target = (ExitScoreSell > 0 && score <= sell_target);
-   bool close_sells_by_cross = (IsCrossSignalEnabled() && cross_event > 0);
+   bool close_buys_by_score = (BUYExitScore > 0 && score >= buy_target);
+   bool close_buys_by_sumit = (BUYExitSumitRSI > 0 && sumit_rsi >= BUYExitSumitRSI);
+   bool close_buys_by_signal = (BUYExitSignalMA3 > 0 && signal_ma3 >= BUYExitSignalMA3);
+   bool close_sells_by_score = (SELLExitScore > 0 && score <= sell_target);
+   bool close_sells_by_sumit = (SELLExitSumitRSI > 0 && sumit_rsi <= SELLExitSumitRSI);
+   bool close_sells_by_signal = (SELLExitSignalMA3 > 0 && signal_ma3 <= SELLExitSignalMA3);
 
-   if(close_buys_by_target || close_buys_by_cross)
+   if(close_buys_by_score || close_buys_by_sumit || close_buys_by_signal)
    {
-      string reason = "Score/cross exit: closing buys";
-      if(close_buys_by_target && close_buys_by_cross)
-         reason = StringFormat("Buy exit: score target + SELL cross (score=%.2f target=%d)", score, buy_target);
-      else if(close_buys_by_target)
-         reason = StringFormat("Buy exit: score target reached (score=%.2f target=%d)", score, buy_target);
-      else
-         reason = "Buy exit: SumitRSI crossed below SignalMA3";
+      string reason = StringFormat(
+         "Buy exit: scoreHit=%s sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
+         close_buys_by_score ? "Y" : "N",
+         close_buys_by_sumit ? "Y" : "N",
+         close_buys_by_signal ? "Y" : "N",
+         score,
+         sumit_rsi,
+         signal_ma3
+      );
 
       if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, reason) > 0)
          SyncTranchesBuy(hedging);
    }
 
-   if(close_sells_by_target || close_sells_by_cross)
+   if(close_sells_by_score || close_sells_by_sumit || close_sells_by_signal)
    {
-      string reason = "Score/cross exit: closing sells";
-      if(close_sells_by_target && close_sells_by_cross)
-         reason = StringFormat("Sell exit: score target + BUY cross (score=%.2f target=%d)", score, sell_target);
-      else if(close_sells_by_target)
-         reason = StringFormat("Sell exit: score target reached (score=%.2f target=%d)", score, sell_target);
-      else
-         reason = "Sell exit: SumitRSI crossed above SignalMA3";
+      string reason = StringFormat(
+         "Sell exit: scoreHit=%s sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
+         close_sells_by_score ? "Y" : "N",
+         close_sells_by_sumit ? "Y" : "N",
+         close_sells_by_signal ? "Y" : "N",
+         score,
+         sumit_rsi,
+         signal_ma3
+      );
 
       if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, reason) > 0)
          SyncTranchesSell(hedging);
@@ -1355,6 +1336,12 @@ int OnInit()
                UpDownStep,
                TrailingTargetPercent,
                RecoverExistingMagicPositions ? "true" : "false");
+   PrintFormat("BUY thresholds: entry(score<=%d,sumit<=%d,signal<=%d) exit(score>=%d,sumit>=%d,signal>=%d)",
+               BUYEntryScore, BUYEntrySumitRSI, BUYEntrySignalMA3,
+               BUYExitScore, BUYExitSumitRSI, BUYExitSignalMA3);
+   PrintFormat("SELL thresholds: entry(score>=%d,sumit>=%d,signal>=%d) exit(score<=%d,sumit<=%d,signal<=%d)",
+               SELLEntryScore, SELLEntrySumitRSI, SELLEntrySignalMA3,
+               SELLExitScore, SELLExitSumitRSI, SELLExitSignalMA3);
    PrintFormat("Side config: BuyEntry=%s SellEntry=%s BuyMagic=%I64u SellMagic=%I64u",
                BuyEntry ? "true" : "false",
                SellEntry ? "true" : "false",
@@ -1407,8 +1394,11 @@ void OnTick()
 
    int score_shift = UseNewBar ? 1 : 0;
    double score = EMPTY_VALUE;
+   double sumit_rsi = EMPTY_VALUE;
+   double signal_ma3 = EMPTY_VALUE;
    bool has_score = GetScoreValue(score_shift, score);
-   int cross_event = GetSumitRsiSignalMA3CrossEventDirection();
+   bool has_sumit = GetSumitIndicatorValue(0, score_shift, sumit_rsi);
+   bool has_signal = GetSumitIndicatorValue(1, score_shift, signal_ma3);
 
    if(!SetTargetWithEntry)
    {
@@ -1416,8 +1406,8 @@ void OnTick()
       CheckTargetsSell(hedging, ask);
    }
 
-   if(has_score)
-      ApplyScoreAndCrossExits(hedging, score, cross_event);
+   if(has_score && has_sumit && has_signal)
+      ApplyScoreAndIndicatorExits(hedging, score, sumit_rsi, signal_ma3);
 
    if(UseNewBar)
    {
@@ -1427,9 +1417,9 @@ void OnTick()
       last_bar_time = bar_time;
    }
 
-   if(!has_score)
+   if(!has_score || !has_sumit || !has_signal)
       return;
 
-   ProcessBuy(hedging, bid, ask, score, cross_event);
-   ProcessSell(hedging, bid, ask, score, cross_event);
+   ProcessBuy(hedging, bid, ask, score, sumit_rsi, signal_ma3);
+   ProcessSell(hedging, bid, ask, score, sumit_rsi, signal_ma3);
 }
