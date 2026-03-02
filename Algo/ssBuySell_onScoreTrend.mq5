@@ -11,31 +11,36 @@
 #include <Trade/Trade.mqh>
 
 // Inputs for Sumit_RSI_Score_Indicator
-input int Rsi1hPeriod = 31;
-input int Sumit_MaBuy = 30;
-input int Sumit_MaSell = 70;
-input int Rsi1hBuy = 40;
-input int Rsi1hSell = 60;
-input int SumitSma3Period = 3;
-input int SumitSma201Period = 201;
-input int SumitRsiPeriod = 7;
+ int Rsi1hPeriod = 31;
+ int Sumit_MaBuy = 30;
+ int Sumit_MaSell = 70;
+ int Rsi1hBuy = 35;
+ int Rsi1hSell = 65;
+ int SumitSma3Period = 3;
+ int SumitSma201Period = 201;
+ int SumitRsiPeriod = 7;
 
 // Side enable + score threshold
 input bool BuyEntry = true;
 input bool SellEntry = true;
 input int BUYEntryScore = 10;   // Buy condition: score <= threshold
 input int BUYExitScore = 60;   // 0=disabled, close BUY when score >= target
-input int BUYEntrySumitRSI = 20;    // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SumitRSI <= level
-input int BUYExitSumitRSI = 60;     // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SumitRSI >= level
-input int BUYEntrySignalMA3 = 20;   // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SignalMA3 <= level
-input int BUYExitSignalMA3 = 60;    // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SignalMA3 >= level
+input int BUYEntrySumitRSI = -1;    // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SumitRSI <= level
+input int BUYExitSumitRSI = -1;     // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SumitRSI >= level
+input int BUYEntrySignalMA3 = -1;   // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SignalMA3 <= level
+input int BUYExitSignalMA3 = -1;    // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SignalMA3 >= level
 
 input int SELLEntryScore = 90;  // Sell condition: score >= threshold
 input int SELLExitScore = 40;  // 0=disabled, close SELL when score <= target
-input int SELLEntrySumitRSI = 60;   // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SumitRSI >= level
-input int SELLExitSumitRSI = 20;    // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SumitRSI <= level
-input int SELLEntrySignalMA3 = 60;  // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SignalMA3 >= level
-input int SELLExitSignalMA3 = 20;   // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SignalMA3 <= level
+input int SELLEntrySumitRSI = -1;   // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SumitRSI >= level
+input int SELLExitSumitRSI = -1;    // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SumitRSI <= level
+input int SELLEntrySignalMA3 = -1;  // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SignalMA3 >= level
+input int SELLExitSignalMA3 = -1;   // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SignalMA3 <= level
+// RSI direction modes: 0=disabled, 1=RisingOrSideways, 2=FallingOrSideways, 3=RisingOnly, 4=FallingOnly, 5=SidewaysOnly
+input int BuyRSIDirectionMode = 0;
+input int SellRSIDirectionMode = 0;
+input int RSIDirectionLookbackBars = 3;
+input double RSISidewaysDelta = 1.0; // RSI points
 
 // SuperTrend filter (runtime-selectable timeframe)
 input bool UseSuperTrend = true;
@@ -236,6 +241,56 @@ int ResolveLinkedThresholdLevel(const int input_level, const int linked_score_le
       return MathMin(100, input_level);
 
    return 0;
+}
+
+int GetRsiDirectionLookback()
+{
+   if(RSIDirectionLookbackBars < 1)
+      return 1;
+   return RSIDirectionLookbackBars;
+}
+
+double GetRsiSidewaysDelta()
+{
+   return MathMax(0.0, RSISidewaysDelta);
+}
+
+bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &value);
+
+bool GetSumitRsiDirectionDelta(const int shift, double &delta)
+{
+   double sumit_curr = 0.0;
+   double sumit_prev = 0.0;
+   int lookback = GetRsiDirectionLookback();
+
+   if(!GetSumitIndicatorValue(0, shift, sumit_curr))
+      return false;
+   if(!GetSumitIndicatorValue(0, shift + lookback, sumit_prev))
+      return false;
+
+   delta = sumit_curr - sumit_prev;
+   return true;
+}
+
+bool IsRsiDirectionAllowed(const int mode, const double delta)
+{
+   if(mode <= 0)
+      return true;
+
+   double sideways_delta = GetRsiSidewaysDelta();
+   bool rising = (delta > sideways_delta);
+   bool falling = (delta < -sideways_delta);
+   bool sideways = (!rising && !falling);
+
+   switch(mode)
+   {
+      case 1: return (rising || sideways); // RisingOrSideways
+      case 2: return (falling || sideways); // FallingOrSideways
+      case 3: return rising; // RisingOnly
+      case 4: return falling; // FallingOnly
+      case 5: return sideways; // SidewaysOnly
+      default: return true;
+   }
 }
 
 bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &value)
@@ -1054,13 +1109,20 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 //+------------------------------------------------------------------+
 //| Trading flow per side                                            |
 //+------------------------------------------------------------------+
-void ProcessBuy(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3)
+void ProcessBuy(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3, const bool has_rsi_direction, const double rsi_direction_delta)
 {
    if(!BuyEntry)
       return;
 
    if(UseSuperTrend && !IsSuperTrendBullishH1(1))
       return;
+   if(BuyRSIDirectionMode > 0)
+   {
+      if(!has_rsi_direction)
+         return;
+      if(!IsRsiDirectionAllowed(BuyRSIDirectionMode, rsi_direction_delta))
+         return;
+   }
 
    int openCount = OpenTrancheCountBuy();
    int scoreTrigger = NormalizeScoreLevel(BUYEntryScore);
@@ -1108,13 +1170,20 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
    }
 }
 
-void ProcessSell(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3)
+void ProcessSell(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3, const bool has_rsi_direction, const double rsi_direction_delta)
 {
    if(!SellEntry)
       return;
 
    if(UseSuperTrend && !IsSuperTrendBearishH1(1))
       return;
+   if(SellRSIDirectionMode > 0)
+   {
+      if(!has_rsi_direction)
+         return;
+      if(!IsRsiDirectionAllowed(SellRSIDirectionMode, rsi_direction_delta))
+         return;
+   }
 
    int openCount = OpenTrancheCountSell();
    int scoreTrigger = NormalizeScoreLevel(SELLEntryScore);
@@ -1362,6 +1431,8 @@ int OnInit()
    PrintFormat("SELL thresholds (-1=>use score): entry(score>=%d,sumit>=%d,signal>=%d) exit(score<=%d,sumit<=%d,signal<=%d)",
                SELLEntryScore, SELLEntrySumitRSI, SELLEntrySignalMA3,
                SELLExitScore, SELLExitSumitRSI, SELLExitSignalMA3);
+   PrintFormat("RSI direction: BuyMode=%d SellMode=%d Lookback=%d SidewaysDelta=%.2f",
+               BuyRSIDirectionMode, SellRSIDirectionMode, GetRsiDirectionLookback(), GetRsiSidewaysDelta());
    PrintFormat("Side config: BuyEntry=%s SellEntry=%s BuyMagic=%I64u SellMagic=%I64u",
                BuyEntry ? "true" : "false",
                SellEntry ? "true" : "false",
@@ -1416,9 +1487,14 @@ void OnTick()
    double score = EMPTY_VALUE;
    double sumit_rsi = EMPTY_VALUE;
    double signal_ma3 = EMPTY_VALUE;
+   double rsi_direction_delta = 0.0;
    bool has_score = GetScoreValue(score_shift, score);
    bool has_sumit = GetSumitIndicatorValue(0, score_shift, sumit_rsi);
    bool has_signal = GetSumitIndicatorValue(1, score_shift, signal_ma3);
+   bool need_rsi_direction = (BuyRSIDirectionMode > 0 || SellRSIDirectionMode > 0);
+   bool has_rsi_direction = true;
+   if(need_rsi_direction)
+      has_rsi_direction = GetSumitRsiDirectionDelta(score_shift, rsi_direction_delta);
 
    if(!SetTargetWithEntry)
    {
@@ -1440,6 +1516,6 @@ void OnTick()
    if(!has_score || !has_sumit || !has_signal)
       return;
 
-   ProcessBuy(hedging, bid, ask, score, sumit_rsi, signal_ma3);
-   ProcessSell(hedging, bid, ask, score, sumit_rsi, signal_ma3);
+   ProcessBuy(hedging, bid, ask, score, sumit_rsi, signal_ma3, has_rsi_direction, rsi_direction_delta);
+   ProcessSell(hedging, bid, ask, score, sumit_rsi, signal_ma3, has_rsi_direction, rsi_direction_delta);
 }
