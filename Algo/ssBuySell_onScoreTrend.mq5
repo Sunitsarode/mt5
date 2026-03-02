@@ -25,16 +25,17 @@ input bool BuyEntry = true;
 input bool SellEntry = true;
 input int BUYEntryScore = 10;   // Buy condition: score <= threshold
 input int BUYExitScore = 60;   // 0=disabled, close BUY when score >= target
+input int BUYEntrySumitRSI = 20;    // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SumitRSI <= level
+input int BUYExitSumitRSI = 60;     // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SumitRSI >= level
+input int BUYEntrySignalMA3 = 20;   // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SignalMA3 <= level
+input int BUYExitSignalMA3 = 60;    // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SignalMA3 >= level
+
 input int SELLEntryScore = 90;  // Sell condition: score >= threshold
 input int SELLExitScore = 40;  // 0=disabled, close SELL when score <= target
-input int BUYEntrySumitRSI = 20;    // 0=disabled, BUY entry when SumitRSI <= level
-input int BUYExitSumitRSI = 60;     // 0=disabled, BUY exit when SumitRSI >= level
-input int BUYEntrySignalMA3 = 20;   // 0=disabled, BUY entry when SignalMA3 <= level
-input int BUYExitSignalMA3 = 60;    // 0=disabled, BUY exit when SignalMA3 >= level
-input int SELLEntrySumitRSI = 60;   // 0=disabled, SELL entry when SumitRSI >= level
-input int SELLExitSumitRSI = 20;    // 0=disabled, SELL exit when SumitRSI <= level
-input int SELLEntrySignalMA3 = 60;  // 0=disabled, SELL entry when SignalMA3 >= level
-input int SELLExitSignalMA3 = 20;   // 0=disabled, SELL exit when SignalMA3 <= level
+input int SELLEntrySumitRSI = 60;   // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SumitRSI >= level
+input int SELLExitSumitRSI = 20;    // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SumitRSI <= level
+input int SELLEntrySignalMA3 = 60;  // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SignalMA3 >= level
+input int SELLExitSignalMA3 = 20;   // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SignalMA3 <= level
 
 // SuperTrend filter (runtime-selectable timeframe)
 input bool UseSuperTrend = true;
@@ -224,6 +225,17 @@ int NormalizeScoreLevel(const int level)
    if(level < 0)
       return 50 + (level * 10);
    return level;
+}
+
+int ResolveLinkedThresholdLevel(const int input_level, const int linked_score_level)
+{
+   if(input_level < 0)
+      return MathMax(0, MathMin(100, linked_score_level));
+
+   if(input_level > 0)
+      return MathMin(100, input_level);
+
+   return 0;
 }
 
 bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &value)
@@ -1052,9 +1064,11 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
 
    int openCount = OpenTrancheCountBuy();
    int scoreTrigger = NormalizeScoreLevel(BUYEntryScore);
+   int entrySumitLevel = ResolveLinkedThresholdLevel(BUYEntrySumitRSI, scoreTrigger);
+   int entrySignalLevel = ResolveLinkedThresholdLevel(BUYEntrySignalMA3, scoreTrigger);
    bool scoreOk = (score <= scoreTrigger);
-   bool sumitOk = (BUYEntrySumitRSI <= 0 || sumit_rsi <= BUYEntrySumitRSI);
-   bool signalOk = (BUYEntrySignalMA3 <= 0 || signal_ma3 <= BUYEntrySignalMA3);
+   bool sumitOk = (entrySumitLevel == 0 || sumit_rsi <= entrySumitLevel);
+   bool signalOk = (entrySignalLevel == 0 || signal_ma3 <= entrySignalLevel);
    bool entryOk = (scoreOk && sumitOk && signalOk);
 
    if(openCount == 0)
@@ -1104,9 +1118,11 @@ void ProcessSell(const bool hedging, const double bid, const double ask, const d
 
    int openCount = OpenTrancheCountSell();
    int scoreTrigger = NormalizeScoreLevel(SELLEntryScore);
+   int entrySumitLevel = ResolveLinkedThresholdLevel(SELLEntrySumitRSI, scoreTrigger);
+   int entrySignalLevel = ResolveLinkedThresholdLevel(SELLEntrySignalMA3, scoreTrigger);
    bool scoreOk = (score >= scoreTrigger);
-   bool sumitOk = (SELLEntrySumitRSI <= 0 || sumit_rsi >= SELLEntrySumitRSI);
-   bool signalOk = (SELLEntrySignalMA3 <= 0 || signal_ma3 >= SELLEntrySignalMA3);
+   bool sumitOk = (entrySumitLevel == 0 || sumit_rsi >= entrySumitLevel);
+   bool signalOk = (entrySignalLevel == 0 || signal_ma3 >= entrySignalLevel);
    bool entryOk = (scoreOk && sumitOk && signalOk);
 
    if(openCount == 0)
@@ -1181,13 +1197,17 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
 {
    int buy_target = NormalizeScoreLevel(BUYExitScore);
    int sell_target = NormalizeScoreLevel(SELLExitScore);
+   int buyExitSumitLevel = ResolveLinkedThresholdLevel(BUYExitSumitRSI, buy_target);
+   int buyExitSignalLevel = ResolveLinkedThresholdLevel(BUYExitSignalMA3, buy_target);
+   int sellExitSumitLevel = ResolveLinkedThresholdLevel(SELLExitSumitRSI, sell_target);
+   int sellExitSignalLevel = ResolveLinkedThresholdLevel(SELLExitSignalMA3, sell_target);
 
    bool close_buys_by_score = (BUYExitScore > 0 && score >= buy_target);
-   bool close_buys_by_sumit = (BUYExitSumitRSI > 0 && sumit_rsi >= BUYExitSumitRSI);
-   bool close_buys_by_signal = (BUYExitSignalMA3 > 0 && signal_ma3 >= BUYExitSignalMA3);
+   bool close_buys_by_sumit = (buyExitSumitLevel > 0 && sumit_rsi >= buyExitSumitLevel);
+   bool close_buys_by_signal = (buyExitSignalLevel > 0 && signal_ma3 >= buyExitSignalLevel);
    bool close_sells_by_score = (SELLExitScore > 0 && score <= sell_target);
-   bool close_sells_by_sumit = (SELLExitSumitRSI > 0 && sumit_rsi <= SELLExitSumitRSI);
-   bool close_sells_by_signal = (SELLExitSignalMA3 > 0 && signal_ma3 <= SELLExitSignalMA3);
+   bool close_sells_by_sumit = (sellExitSumitLevel > 0 && sumit_rsi <= sellExitSumitLevel);
+   bool close_sells_by_signal = (sellExitSignalLevel > 0 && signal_ma3 <= sellExitSignalLevel);
 
    if(close_buys_by_score || close_buys_by_sumit || close_buys_by_signal)
    {
@@ -1336,10 +1356,10 @@ int OnInit()
                UpDownStep,
                TrailingTargetPercent,
                RecoverExistingMagicPositions ? "true" : "false");
-   PrintFormat("BUY thresholds: entry(score<=%d,sumit<=%d,signal<=%d) exit(score>=%d,sumit>=%d,signal>=%d)",
+   PrintFormat("BUY thresholds (-1=>use score): entry(score<=%d,sumit<=%d,signal<=%d) exit(score>=%d,sumit>=%d,signal>=%d)",
                BUYEntryScore, BUYEntrySumitRSI, BUYEntrySignalMA3,
                BUYExitScore, BUYExitSumitRSI, BUYExitSignalMA3);
-   PrintFormat("SELL thresholds: entry(score>=%d,sumit>=%d,signal>=%d) exit(score<=%d,sumit<=%d,signal<=%d)",
+   PrintFormat("SELL thresholds (-1=>use score): entry(score>=%d,sumit>=%d,signal>=%d) exit(score<=%d,sumit<=%d,signal<=%d)",
                SELLEntryScore, SELLEntrySumitRSI, SELLEntrySignalMA3,
                SELLExitScore, SELLExitSumitRSI, SELLExitSignalMA3);
    PrintFormat("Side config: BuyEntry=%s SellEntry=%s BuyMagic=%I64u SellMagic=%I64u",
