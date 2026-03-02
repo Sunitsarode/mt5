@@ -24,16 +24,16 @@ input int SumitRsiPeriod = 7;
 input bool BuyEntry = true;
 input bool SellEntry = true;
 input int EntryScoreBuy = 10;   // Buy condition: score <= threshold
-input int EntryScoreSell = 90;  // Sell condition: score >= threshold
+input int EntryScoreSell = 60;  // Sell condition: score >= threshold
 input int ExitScoreBuy = 50;   // 0=disabled, close BUY when score >= target
 input int ExitScoreSell = 50;  // 0=disabled, close SELL when score <= target
 input int OnCross_SumitRSI_SignalMA3 = 0; // 0=disabled, 1=enable SumitRSI/SignalMA3 cross logic
 
 // SuperTrend filter (runtime-selectable timeframe)
-input bool UseSuperTrend = false;
+input bool UseSuperTrend = true;
 input int SupertrendAtrPeriod = 51;
-input double SupertrendMultiplier = 0.5;
-input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_M15; // e.g.  PERIOD_H1
+input double SupertrendMultiplier = 1;
+input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_H1; // e.g.  PERIOD_H1
 input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
 input bool SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
@@ -41,8 +41,9 @@ input bool SupetrendBasedSL = false; // Close opposite-direction trades when Sup
 // Trading logic (common)
 input double MinTargetPoints = 10.0;    // Minimum TP distance in points
 input double TargetPercent = 0.01;      // TP distance in percent of entry price
+input double UpDownStep = 0.01;         // Add-entry spacing in percent of reference price
 input bool SetTargetWithEntry = false;  // Place broker TP in the entry request
-input double TrailingTargetPips = 0.005; // Used only when SetTargetWithEntry=false, interpreted as percent (0 disables trailing)
+input double TrailingTargetPercent = 0.005; // Used only when SetTargetWithEntry=false (0 disables trailing)
 input bool RecoverExistingMagicPositions = true; // Rebuild and manage existing magic positions on restart
 
 // Buy-side settings
@@ -107,6 +108,9 @@ double g_vol_step = 0.0;
 double g_point = 0.0;
 double g_pip = 0.0;
 int g_digits = 0;
+double g_target_percent_to_pips_factor = 0.0;
+double g_step_percent_to_pips_factor = 0.0;
+double g_trailing_percent_to_pips_factor = 0.0;
 
 //+------------------------------------------------------------------+
 //| Utility                                                          |
@@ -151,10 +155,19 @@ double CalculatePipSize()
    return g_point;
 }
 
+double CalculatePercentDistanceInPips(const double reference_price, const double percent_to_pips_factor)
+{
+   if(reference_price <= 0.0 || percent_to_pips_factor <= 0.0)
+      return 0.0;
+
+   return reference_price * percent_to_pips_factor;
+}
+
 double CalculateTargetDistance(const double entry_price)
 {
    double minDist = MinTargetPoints * g_point;
-   double pctDist = entry_price * (TargetPercent / 100.0);
+   double pctDistPips = CalculatePercentDistanceInPips(entry_price, g_target_percent_to_pips_factor);
+   double pctDist = pctDistPips * g_pip;
    return MathMax(minDist, pctDist);
 }
 
@@ -170,14 +183,16 @@ double CalculateTargetPriceSell(const double entry_price)
 
 double CalculateTrailingDistance(const double reference_price)
 {
-   if(TrailingTargetPips <= 0.0 || reference_price <= 0.0)
+   if(TrailingTargetPercent <= 0.0 || reference_price <= 0.0)
       return 0.0;
-   return reference_price * (TrailingTargetPips / 100.0);
+   double trailingDistPips = CalculatePercentDistanceInPips(reference_price, g_trailing_percent_to_pips_factor);
+   return trailingDistPips * g_pip;
 }
 
 double CalculateStepDistance(const double reference_price)
 {
-   return reference_price * (TargetPercent / 100.0);
+   double stepDistPips = CalculatePercentDistanceInPips(reference_price, g_step_percent_to_pips_factor);
+   return stepDistPips * g_pip;
 }
 
 bool GetScoreValue(const int shift, double &score)
@@ -207,16 +222,6 @@ int NormalizeScoreLevel(const int level)
 bool IsCrossSignalEnabled()
 {
    return (OnCross_SumitRSI_SignalMA3 == 1);
-}
-
-bool UseScoreTargetExitBuy()
-{
-   return (ExitScoreBuy > 0 || IsCrossSignalEnabled());
-}
-
-bool UseScoreTargetExitSell()
-{
-   return (ExitScoreSell > 0 || IsCrossSignalEnabled());
 }
 
 bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &value)
@@ -387,7 +392,7 @@ void UpdateLastEntryFromOpenBuy()
 
 void EnsureServerTargetsForOpenPositionsBuy(const bool hedging)
 {
-   if(!SetTargetWithEntry || !RecoverExistingMagicPositions || UseScoreTargetExitBuy())
+   if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
       return;
 
    int ptotal = PositionsTotal();
@@ -566,7 +571,7 @@ void CheckTargetsBuy(const bool hedging, const double current_price)
    if(total == 0)
       return;
 
-   bool use_trailing = (!SetTargetWithEntry && TrailingTargetPips > 0.0);
+   bool use_trailing = (!SetTargetWithEntry && TrailingTargetPercent > 0.0);
 
    for(int i = 0; i < total; i++)
    {
@@ -648,7 +653,7 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
 
    string comment = StringFormat("SB|lot=%.2f", vol);
    double request_target = 0.0;
-   if(SetTargetWithEntry && !UseScoreTargetExitBuy())
+   if(SetTargetWithEntry)
       request_target = CalculateTargetPriceBuy(price);
 
    if(!trade.Buy(vol, _Symbol, 0, 0, request_target, comment))
@@ -672,7 +677,7 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
 
    double tranche_target = CalculateTargetPriceBuy(entry_price);
 
-   if(SetTargetWithEntry && !UseScoreTargetExitBuy())
+   if(SetTargetWithEntry)
    {
       bool can_verify_position = false;
       bool modified = true;
@@ -742,7 +747,7 @@ void UpdateLastEntryFromOpenSell()
 
 void EnsureServerTargetsForOpenPositionsSell(const bool hedging)
 {
-   if(!SetTargetWithEntry || !RecoverExistingMagicPositions || UseScoreTargetExitSell())
+   if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
       return;
 
    int ptotal = PositionsTotal();
@@ -921,7 +926,7 @@ void CheckTargetsSell(const bool hedging, const double current_price)
    if(total == 0)
       return;
 
-   bool use_trailing = (!SetTargetWithEntry && TrailingTargetPips > 0.0);
+   bool use_trailing = (!SetTargetWithEntry && TrailingTargetPercent > 0.0);
 
    for(int i = 0; i < total; i++)
    {
@@ -1003,7 +1008,7 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 
    string comment = StringFormat("SS|lot=%.2f", vol);
    double request_target = 0.0;
-   if(SetTargetWithEntry && !UseScoreTargetExitSell())
+   if(SetTargetWithEntry)
       request_target = CalculateTargetPriceSell(price);
 
    if(!trade.Sell(vol, _Symbol, 0, 0, request_target, comment))
@@ -1027,7 +1032,7 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 
    double tranche_target = CalculateTargetPriceSell(entry_price);
 
-   if(SetTargetWithEntry && !UseScoreTargetExitSell())
+   if(SetTargetWithEntry)
    {
       bool can_verify_position = false;
       bool modified = true;
@@ -1289,6 +1294,15 @@ int OnInit()
       return(INIT_FAILED);
    }
 
+   double target_percent_factor = MathMax(0.0, TargetPercent) / 100.0;
+   double step_percent_factor = MathMax(0.0, UpDownStep) / 100.0;
+   double trailing_percent_factor = MathMax(0.0, TrailingTargetPercent) / 100.0;
+   double pip_inv = 1.0 / g_pip;
+
+   g_target_percent_to_pips_factor = target_percent_factor * pip_inv;
+   g_step_percent_to_pips_factor = step_percent_factor * pip_inv;
+   g_trailing_percent_to_pips_factor = trailing_percent_factor * pip_inv;
+
    sumitScoreHandle = iCustom(
       _Symbol,
       PERIOD_CURRENT,
@@ -1335,9 +1349,11 @@ int OnInit()
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
    PrintFormat("Price format: digits=%d point=%.10f pip=%.10f", g_digits, g_point, g_pip);
-   PrintFormat("Mode: SetTargetWithEntry=%s TrailingTargetPercent=%.4f RecoverExistingMagicPositions=%s",
+   PrintFormat("Mode: SetTargetWithEntry=%s TargetPercent=%.4f UpDownStep=%.4f TrailingTargetPercent=%.4f RecoverExistingMagicPositions=%s",
                SetTargetWithEntry ? "true" : "false",
-               TrailingTargetPips,
+               TargetPercent,
+               UpDownStep,
+               TrailingTargetPercent,
                RecoverExistingMagicPositions ? "true" : "false");
    PrintFormat("Side config: BuyEntry=%s SellEntry=%s BuyMagic=%I64u SellMagic=%I64u",
                BuyEntry ? "true" : "false",
@@ -1396,10 +1412,8 @@ void OnTick()
 
    if(!SetTargetWithEntry)
    {
-      if(!UseScoreTargetExitBuy())
-         CheckTargetsBuy(hedging, bid);
-      if(!UseScoreTargetExitSell())
-         CheckTargetsSell(hedging, ask);
+      CheckTargetsBuy(hedging, bid);
+      CheckTargetsSell(hedging, ask);
    }
 
    if(has_score)
