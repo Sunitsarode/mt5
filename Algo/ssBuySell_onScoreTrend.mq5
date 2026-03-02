@@ -19,61 +19,63 @@
  int SumitSma3Period = 3;
  int SumitSma201Period = 201;
  int SumitRsiPeriod = 7;
+// BUYEntrySumitRSI = -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SumitRSI <= level
+//BuyRSIDirectionMode RSI direction modes: 0=disabled, 1=RisingOrSideways, 2=FallingOrSideways, 3=RisingOnly, 4=FallingOnly, 5=SidewaysOnly
+//SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
+//chk_last_candle_breaks_buy = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/close
+// chk_last_candle_type_buy = "0";  //  G=green candle, R=red candle  0=disabled
+//SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
 
-// Side enable + score threshold
+
+
 input bool BuyEntry = true;
+input int BUYEntryScore = 10; 
+input int BUYExitScore = 60;   
+input int BUYEntrySumitRSI = -1;    
+input int BUYExitSumitRSI = -1;     
+input int BUYEntrySignalMA3 = -1;   
+input int BUYExitSignalMA3 = -1; 
+input int BuyRSIDirectionMode = 0;  
+input string chk_last_candle_breaks_buy = "0"; 
+input string chk_last_candle_type_buy = "0";  
+input double BuyLotSize = 0.01;
+input double BuyLotStep = 0.01;
+input int BuyMaxEntries = 0;  
+
 input bool SellEntry = true;
-input int BUYEntryScore = 10;   // Buy condition: score <= threshold
-input int BUYExitScore = 60;   // 0=disabled, close BUY when score >= target
-input int BUYEntrySumitRSI = -1;    // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SumitRSI <= level
-input int BUYExitSumitRSI = -1;     // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SumitRSI >= level
-input int BUYEntrySignalMA3 = -1;   // -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SignalMA3 <= level
-input int BUYExitSignalMA3 = -1;    // -1=use BUYExitScore, 0=disabled, 1..100=manual, BUY exit when SignalMA3 >= level
-
-input int SELLEntryScore = 90;  // Sell condition: score >= threshold
-input int SELLExitScore = 40;  // 0=disabled, close SELL when score <= target
-input int SELLEntrySumitRSI = -1;   // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SumitRSI >= level
-input int SELLExitSumitRSI = -1;    // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SumitRSI <= level
-input int SELLEntrySignalMA3 = -1;  // -1=use SELLEntryScore, 0=disabled, 1..100=manual, SELL entry when SignalMA3 >= level
-input int SELLExitSignalMA3 = -1;   // -1=use SELLExitScore, 0=disabled, 1..100=manual, SELL exit when SignalMA3 <= level
-// RSI direction modes: 0=disabled, 1=RisingOrSideways, 2=FallingOrSideways, 3=RisingOnly, 4=FallingOnly, 5=SidewaysOnly
-input int BuyRSIDirectionMode = 0;
+input int SELLEntryScore = 90;  
+input int SELLExitScore = 40;  
+input int SELLEntrySumitRSI = -1;   
+input int SELLExitSumitRSI = -1;    
+input int SELLEntrySignalMA3 = -1;  
+input int SELLExitSignalMA3 = -1;   
 input int SellRSIDirectionMode = 0;
-input int RSIDirectionLookbackBars = 3;
-input double RSISidewaysDelta = 1.0; // RSI points
+input string chk_last_candle_breaks_sell = "0"; 
+input string chk_last_candle_type_sell = "0";   
+input double SellLotSize = 0.01;
+input double SellLotStep = 0.01;
+input int SellMaxEntries = 0;
 
-// SuperTrend filter (runtime-selectable timeframe)
+input int RSIDirectionLookbackBars = 3;
+input double RSISidewaysDelta = 1.0; 
+
+
 input bool UseSuperTrend = true;
 input int SupertrendAtrPeriod = 51;
 input double SupertrendMultiplier = 1;
-input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_H1; // e.g.  PERIOD_H1
-input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
-input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
-input bool SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
+input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_H1; 
+ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
+bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
+input bool SupetrendBasedSL = false; 
 
 // Trading logic (common)
-input double MinTargetPoints = 10.0;    // Minimum TP distance in points
-input double TargetPercent = 0.01;      // TP distance in percent of entry price
-input double UpDownStep = 0.01;         // Add-entry spacing in percent of reference price
-input bool SetTargetWithEntry = false;  // Place broker TP in the entry request
-input double TrailingTargetPercent = 0.005; // Used only when SetTargetWithEntry=false (0 disables trailing)
-input bool RecoverExistingMagicPositions = true; // Rebuild and manage existing magic positions on restart
+input double TargetPercent = 0.05;      
+input double UpDownStep = 0.01;         
+input bool SetTargetWithEntry = false;  // brokerside SetTargetWithEntry
+input double TrailingTargetPercent = 0.005; //TrailingTargetPercent (0 disables)
+bool RecoverExistingMagicPositions = true; 
 
-// Buy-side settings
-input string chk_last_candle_breaks_buy = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
-input string chk_last_candle_type_buy = "0";   // 0=disabled, G=green candle, R=red candle
-input double BuyLotSize = 0.01;
-input double BuyLotStep = 0.01;
-input int BuyMaxEntries = 0; // 0 = unlimited
 
-// Sell-side settings
-input string chk_last_candle_breaks_sell = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/Close
-input string chk_last_candle_type_sell = "0";   // 0=disabled, G=green candle, R=red candle
-input double SellLotSize = 0.01;
-input double SellLotStep = 0.01;
-input int SellMaxEntries = 0; // 0 = unlimited
-
-// Execution
 input ulong BuyMagicNumber = 1051;
 input ulong SellMagicNumber = 2051;
 input int Deviation = 30;
@@ -178,10 +180,8 @@ double CalculatePercentDistanceInPips(const double reference_price, const double
 
 double CalculateTargetDistance(const double entry_price)
 {
-   double minDist = MinTargetPoints * g_point;
    double pctDistPips = CalculatePercentDistanceInPips(entry_price, g_target_percent_to_pips_factor);
-   double pctDist = pctDistPips * g_pip;
-   return MathMax(minDist, pctDist);
+   return pctDistPips * g_pip;
 }
 
 double CalculateTargetPriceBuy(const double entry_price)
