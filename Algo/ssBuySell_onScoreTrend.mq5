@@ -29,13 +29,13 @@
 
 
 input bool BuyEntry = true;
-input int BUYEntryScore = 10; 
+input int BUYEntryScore = 20; 
 input int BUYExitScore = 60;   
-input int BUYEntrySumitRSI = -1;    
-input int BUYExitSumitRSI = -1;     
-input int BUYEntrySignalMA3 = -1;   
-input int BUYExitSignalMA3 = -1; 
-input int BuyRSIDirectionMode = 0;  
+input int BUYEntrySumitRSI = 10;    
+input int BUYExitSumitRSI = 90;     
+input int BUYEntrySignalMA3 = 10;   
+input int BUYExitSignalMA3 = 90; 
+input int BuyRSIDirectionMode = 1;  
 input string chk_last_candle_breaks_buy = "0"; 
 input string chk_last_candle_type_buy = "0";  
 input double BuyLotSize = 0.01;
@@ -43,18 +43,20 @@ input double BuyLotStep = 0.01;
 input int BuyMaxEntries = 0;  
 
 input bool SellEntry = true;
-input int SELLEntryScore = 90;  
+input int SELLEntryScore = 80;  
 input int SELLExitScore = 40;  
-input int SELLEntrySumitRSI = -1;   
-input int SELLExitSumitRSI = -1;    
-input int SELLEntrySignalMA3 = -1;  
-input int SELLExitSignalMA3 = -1;   
-input int SellRSIDirectionMode = 0;
+input int SELLEntrySumitRSI = 90;   
+input int SELLExitSumitRSI = 10;    
+input int SELLEntrySignalMA3 = 90;  
+input int SELLExitSignalMA3 = 10;   
+input int SellRSIDirectionMode = 2;
 input string chk_last_candle_breaks_sell = "0"; 
 input string chk_last_candle_type_sell = "0";   
 input double SellLotSize = 0.01;
 input double SellLotStep = 0.01;
 input int SellMaxEntries = 0;
+
+input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
 
 input int RSIDirectionLookbackBars = 3;
 input double RSISidewaysDelta = 1.0; 
@@ -62,17 +64,18 @@ input double RSISidewaysDelta = 1.0;
 
 input bool UseSuperTrend = true;
 input int SupertrendAtrPeriod = 51;
-input double SupertrendMultiplier = 1;
+input double SupertrendMultiplier = 1.5;
 input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_H1; 
 ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
 input bool SupetrendBasedSL = false; 
 
 // Trading logic (common)
-input double TargetPercent = 0.05;      
-input double UpDownStep = 0.01;         
+input double TargetPercent = 0.175;      
+input double UpDownStep = 0.025;         
 input bool SetTargetWithEntry = false;  // brokerside SetTargetWithEntry
-input double TrailingTargetPercent = 0.005; //TrailingTargetPercent (0 disables)
+input double TrailingTargetPercent = 0.02; //TrailingTargetPercent (0 disables)
+
 bool RecoverExistingMagicPositions = true; 
 
 
@@ -126,6 +129,10 @@ int g_digits = 0;
 double g_target_percent_to_pips_factor = 0.0;
 double g_step_percent_to_pips_factor = 0.0;
 double g_trailing_percent_to_pips_factor = 0.0;
+int g_buy_score_trail_stop = 0;
+int g_buy_score_trail_next = 0;
+int g_sell_score_trail_stop = 0;
+int g_sell_score_trail_next = 0;
 
 //+------------------------------------------------------------------+
 //| Utility                                                          |
@@ -241,6 +248,153 @@ int ResolveLinkedThresholdLevel(const int input_level, const int linked_score_le
       return MathMin(100, input_level);
 
    return 0;
+}
+
+int NormalizeScoreTrailStartBuy(const int level)
+{
+   int clamped = MathMax(10, MathMin(90, level));
+   return (clamped / 10) * 10;
+}
+
+int NormalizeScoreTrailStartSell(const int level)
+{
+   int clamped = MathMax(10, MathMin(90, level));
+   int rem = clamped % 10;
+   if(rem != 0)
+      clamped += (10 - rem);
+   if(clamped > 90)
+      clamped = 90;
+   return clamped;
+}
+
+void ResetBuyScoreTrailState()
+{
+   g_buy_score_trail_stop = 0;
+   g_buy_score_trail_next = 0;
+}
+
+void ResetSellScoreTrailState()
+{
+   g_sell_score_trail_stop = 0;
+   g_sell_score_trail_next = 0;
+}
+
+bool EvaluateBuyScoreExit(const double score, const int raw_target, string &reason)
+{
+   if(!EntryScoreSLTrail)
+   {
+      if(score >= raw_target)
+      {
+         reason = StringFormat("score %.2f >= target %d", score, raw_target);
+         return true;
+      }
+      return false;
+   }
+
+   int trail_start = NormalizeScoreTrailStartBuy(raw_target);
+
+   if(trail_start >= 90)
+   {
+      if(score >= trail_start)
+      {
+         reason = StringFormat("trail finished at %d (score %.2f)", trail_start, score);
+         return true;
+      }
+      return false;
+   }
+
+   if(g_buy_score_trail_stop <= 0)
+   {
+      if(score >= trail_start)
+      {
+         g_buy_score_trail_stop = trail_start;
+         g_buy_score_trail_next = trail_start + 10;
+         PrintFormat("Buy score trail started. stop=%d next=%d score=%.2f",
+                     g_buy_score_trail_stop, g_buy_score_trail_next, score);
+      }
+      return false;
+   }
+
+   while(g_buy_score_trail_next > 0 && g_buy_score_trail_next <= 90 && score >= g_buy_score_trail_next)
+   {
+      g_buy_score_trail_stop = g_buy_score_trail_next;
+      g_buy_score_trail_next = (g_buy_score_trail_stop >= 90) ? 0 : (g_buy_score_trail_stop + 10);
+      PrintFormat("Buy score trail advanced. stop=%d next=%d score=%.2f",
+                  g_buy_score_trail_stop, g_buy_score_trail_next, score);
+   }
+
+   if(g_buy_score_trail_stop >= 90)
+   {
+      reason = StringFormat("trail finished at 90 (score %.2f)", score);
+      return true;
+   }
+
+   if(score < g_buy_score_trail_stop)
+   {
+      reason = StringFormat("trail stop hit (score %.2f < %d)", score, g_buy_score_trail_stop);
+      return true;
+   }
+
+   return false;
+}
+
+bool EvaluateSellScoreExit(const double score, const int raw_target, string &reason)
+{
+   if(!EntryScoreSLTrail)
+   {
+      if(score <= raw_target)
+      {
+         reason = StringFormat("score %.2f <= target %d", score, raw_target);
+         return true;
+      }
+      return false;
+   }
+
+   int trail_start = NormalizeScoreTrailStartSell(raw_target);
+
+   if(trail_start <= 10)
+   {
+      if(score <= trail_start)
+      {
+         reason = StringFormat("trail finished at %d (score %.2f)", trail_start, score);
+         return true;
+      }
+      return false;
+   }
+
+   if(g_sell_score_trail_stop <= 0)
+   {
+      if(score <= trail_start)
+      {
+         g_sell_score_trail_stop = trail_start;
+         g_sell_score_trail_next = trail_start - 10;
+         PrintFormat("Sell score trail started. stop=%d next=%d score=%.2f",
+                     g_sell_score_trail_stop, g_sell_score_trail_next, score);
+      }
+      return false;
+   }
+
+   while(g_sell_score_trail_next >= 10 && score <= g_sell_score_trail_next)
+   {
+      g_sell_score_trail_stop = g_sell_score_trail_next;
+      g_sell_score_trail_next = (g_sell_score_trail_stop <= 10) ? 0 : (g_sell_score_trail_stop - 10);
+      PrintFormat("Sell score trail advanced. stop=%d next=%d score=%.2f",
+                  g_sell_score_trail_stop, g_sell_score_trail_next, score);
+   }
+
+   if(g_sell_score_trail_stop <= 10)
+   {
+      reason = StringFormat("trail finished at 10 (score %.2f)", score);
+      return true;
+   }
+
+   if(score > g_sell_score_trail_stop)
+   {
+      reason = StringFormat("trail stop hit (score %.2f > %d)", score, g_sell_score_trail_stop);
+      return true;
+   }
+
+   return false;
 }
 
 int GetRsiDirectionLookback()
@@ -1271,18 +1425,28 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
    int sellExitSumitLevel = ResolveLinkedThresholdLevel(SELLExitSumitRSI, sell_target);
    int sellExitSignalLevel = ResolveLinkedThresholdLevel(SELLExitSignalMA3, sell_target);
 
-   bool close_buys_by_score = (BUYExitScore > 0 && score >= buy_target);
+   int open_buy_count = OpenTrancheCountBuy();
+   int open_sell_count = OpenTrancheCountSell();
+   if(open_buy_count <= 0)
+      ResetBuyScoreTrailState();
+   if(open_sell_count <= 0)
+      ResetSellScoreTrailState();
+
+   string buy_score_reason = "";
+   string sell_score_reason = "";
+   bool close_buys_by_score = (BUYExitScore > 0 && open_buy_count > 0 && EvaluateBuyScoreExit(score, buy_target, buy_score_reason));
    bool close_buys_by_sumit = (buyExitSumitLevel > 0 && sumit_rsi >= buyExitSumitLevel);
    bool close_buys_by_signal = (buyExitSignalLevel > 0 && signal_ma3 >= buyExitSignalLevel);
-   bool close_sells_by_score = (SELLExitScore > 0 && score <= sell_target);
+   bool close_sells_by_score = (SELLExitScore > 0 && open_sell_count > 0 && EvaluateSellScoreExit(score, sell_target, sell_score_reason));
    bool close_sells_by_sumit = (sellExitSumitLevel > 0 && sumit_rsi <= sellExitSumitLevel);
    bool close_sells_by_signal = (sellExitSignalLevel > 0 && signal_ma3 <= sellExitSignalLevel);
 
    if(close_buys_by_score || close_buys_by_sumit || close_buys_by_signal)
    {
       string reason = StringFormat(
-         "Buy exit: scoreHit=%s sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
+         "Buy exit: scoreHit=%s(%s) sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
          close_buys_by_score ? "Y" : "N",
+         buy_score_reason,
          close_buys_by_sumit ? "Y" : "N",
          close_buys_by_signal ? "Y" : "N",
          score,
@@ -1291,14 +1455,18 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
       );
 
       if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, reason) > 0)
+      {
          SyncTranchesBuy(hedging);
+         ResetBuyScoreTrailState();
+      }
    }
 
    if(close_sells_by_score || close_sells_by_sumit || close_sells_by_signal)
    {
       string reason = StringFormat(
-         "Sell exit: scoreHit=%s sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
+         "Sell exit: scoreHit=%s(%s) sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
          close_sells_by_score ? "Y" : "N",
+         sell_score_reason,
          close_sells_by_sumit ? "Y" : "N",
          close_sells_by_signal ? "Y" : "N",
          score,
@@ -1307,7 +1475,10 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
       );
 
       if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, reason) > 0)
+      {
          SyncTranchesSell(hedging);
+         ResetSellScoreTrailState();
+      }
    }
 }
 
@@ -1419,11 +1590,12 @@ int OnInit()
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
    PrintFormat("Price format: digits=%d point=%.10f pip=%.10f", g_digits, g_point, g_pip);
-   PrintFormat("Mode: SetTargetWithEntry=%s TargetPercent=%.4f UpDownStep=%.4f TrailingTargetPercent=%.4f RecoverExistingMagicPositions=%s",
+   PrintFormat("Mode: SetTargetWithEntry=%s TargetPercent=%.4f UpDownStep=%.4f TrailingTargetPercent=%.4f EntryScoreSLTrail=%s RecoverExistingMagicPositions=%s",
                SetTargetWithEntry ? "true" : "false",
                TargetPercent,
                UpDownStep,
                TrailingTargetPercent,
+               EntryScoreSLTrail ? "true" : "false",
                RecoverExistingMagicPositions ? "true" : "false");
    PrintFormat("BUY thresholds (-1=>use score): entry(score<=%d,sumit<=%d,signal<=%d) exit(score>=%d,sumit>=%d,signal>=%d)",
                BUYEntryScore, BUYEntrySumitRSI, BUYEntrySignalMA3,
