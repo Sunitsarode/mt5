@@ -19,7 +19,7 @@
 input int    ATRPeriod       = 51;              // Period for ATR calculation
 input double Multiplier      = 1.5;             // ATR multiplier for band calculation
 input ENUM_APPLIED_PRICE SourcePrice = PRICE_MEDIAN; // Price source for calculations
-input bool   TakeWicksIntoAccount = true;            // Include wicks in calculations
+input bool   TakeWicksIntoAccount = false;            // Include wicks in calculations
 input ENUM_TIMEFRAMES CalcTimeframe = PERIOD_CURRENT; // Timeframe used for calculations
 input int CandleShift = 0;                           // 0=current candle, 1=previous candle
 input double DistanceFactor = 1.0;                   // <1.0 brings line closer to candles
@@ -148,8 +148,12 @@ int OnCalculate(
     // Compute SuperTrend once on the selected timeframe.
     static double tfSuperTrend[];
     static double tfDirection[];
+    static double tfUpperBand[];
+    static double tfLowerBand[];
     ArrayResize(tfSuperTrend, tf_count);
     ArrayResize(tfDirection, tf_count);
+    ArrayResize(tfUpperBand, tf_count);
+    ArrayResize(tfLowerBand, tf_count);
 
     double effective_multiplier = Multiplier * g_distance_factor;
 
@@ -165,13 +169,18 @@ int OnCalculate(
         {
             if(j == 0)
             {
-                tfSuperTrend[j] = (tf_high + tf_low) * 0.5;
-                tfDirection[j] = 1.0;
+                double fallback = (tf_high + tf_low) * 0.5;
+                tfSuperTrend[j] = fallback;
+                tfDirection[j] = -1.0;
+                tfLowerBand[j] = fallback;
+                tfUpperBand[j] = fallback;
             }
             else
             {
                 tfSuperTrend[j] = tfSuperTrend[j - 1];
                 tfDirection[j] = tfDirection[j - 1];
+                tfLowerBand[j] = tfLowerBand[j - 1];
+                tfUpperBand[j] = tfUpperBand[j - 1];
             }
             continue;
         }
@@ -203,59 +212,68 @@ int OnCalculate(
                 break;
         }
 
-        // 2) High/Low source for trend flips.
-        double highPrice = TakeWicksIntoAccount ? tf_high : tf_close;
-        double lowPrice = TakeWicksIntoAccount ? tf_low : tf_close;
+        // 2) Compute raw bands for this bar.
+        double lowerBandRaw = srcPrice - effective_multiplier * atr;
+        double upperBandRaw = srcPrice + effective_multiplier * atr;
 
-        // 3) Long/short stop calculation.
-        double longStop = srcPrice - effective_multiplier * atr;
-        double prevStop = (j > 0 && tfSuperTrend[j - 1] != EMPTY_VALUE) ? tfSuperTrend[j - 1] : longStop;
-        double longStopPrev = prevStop;
-
-        if(longStop > 0.0)
+        if(j == 0)
         {
-            if(tf_open == tf_close && tf_open == tf_low && tf_open == tf_high)
-                longStop = longStopPrev;
-            else
-                longStop = (lowPrice > longStopPrev ? MathMax(longStop, longStopPrev) : longStop);
+            tfLowerBand[j] = lowerBandRaw;
+            tfUpperBand[j] = upperBandRaw;
+
+            // TradingView's ta.supertrend starts with direction=+1 (downtrend).
+            // Keep internal output convention: +1 bullish, -1 bearish.
+            int tvDir0 = 1;
+            tfDirection[j] = (tvDir0 == -1) ? 1.0 : -1.0;
+            tfSuperTrend[j] = (tvDir0 == -1) ? tfLowerBand[j] : tfUpperBand[j];
+            continue;
         }
+
+        // 3) Carry forward final bands like TradingView's ta.supertrend logic.
+        double prevLower = tfLowerBand[j - 1];
+        double prevUpper = tfUpperBand[j - 1];
+        double prevClose = tfClose[j - 1];
+        double prevLow = tfLow[j - 1];
+        double prevHigh = tfHigh[j - 1];
+
+        double carryCloseLower = TakeWicksIntoAccount ? prevLow : prevClose;
+        double carryCloseUpper = TakeWicksIntoAccount ? prevHigh : prevClose;
+
+        // TV lower: lowerRaw if (lowerRaw > prevLower) or (close[1] < prevLower), else prevLower.
+        if(lowerBandRaw > prevLower || carryCloseLower < prevLower)
+            tfLowerBand[j] = lowerBandRaw;
         else
-            longStop = longStopPrev;
+            tfLowerBand[j] = prevLower;
 
-        double shortStop = srcPrice + effective_multiplier * atr;
-        double shortStopPrev = prevStop;
-
-        if(shortStop > 0.0)
-        {
-            if(tf_open == tf_close && tf_open == tf_low && tf_open == tf_high)
-                shortStop = shortStopPrev;
-            else
-                shortStop = (highPrice < shortStopPrev ? MathMin(shortStop, shortStopPrev) : shortStop);
-        }
+        // TV upper: upperRaw if (upperRaw < prevUpper) or (close[1] > prevUpper), else prevUpper.
+        if(upperBandRaw < prevUpper || carryCloseUpper > prevUpper)
+            tfUpperBand[j] = upperBandRaw;
         else
-            shortStop = shortStopPrev;
+            tfUpperBand[j] = prevUpper;
 
-        // 4) Direction change logic.
-        int supertrend_dir = 1;
-        if(j > 0 && tfDirection[j - 1] != EMPTY_VALUE)
-            supertrend_dir = (int)tfDirection[j - 1];
+        // 4) Direction logic matching TradingView's ta.supertrend.
+        // TV convention: -1 = uptrend, +1 = downtrend.
+        int prevTvDir = (tfDirection[j - 1] > 0.0) ? -1 : 1; // convert from internal sign
+        int tvDir = prevTvDir;
 
-        if(supertrend_dir == -1 && highPrice > shortStopPrev)
-            supertrend_dir = 1;
-        else if(supertrend_dir == 1 && lowPrice < longStopPrev)
-            supertrend_dir = -1;
-
-        // 5) Final selected line.
-        if(supertrend_dir == 1)
+        if(atrBuffer[j - 1] == EMPTY_VALUE || atrBuffer[j - 1] <= 0.0)
         {
-            tfSuperTrend[j] = longStop;
-            tfDirection[j] = 1.0;
+            tvDir = 1; // downtrend during warmup
         }
-        else
+        else if(prevTvDir == 1) // previous supertrend was upper band (downtrend)
         {
-            tfSuperTrend[j] = shortStop;
-            tfDirection[j] = -1.0;
+            double flipUpSource = TakeWicksIntoAccount ? tf_high : tf_close;
+            tvDir = (flipUpSource > tfUpperBand[j]) ? -1 : 1;
         }
+        else // previous supertrend was lower band (uptrend)
+        {
+            double flipDownSource = TakeWicksIntoAccount ? tf_low : tf_close;
+            tvDir = (flipDownSource < tfLowerBand[j]) ? 1 : -1;
+        }
+
+        // 5) Final selected line + keep original output direction sign for EA compatibility.
+        tfSuperTrend[j] = (tvDir == -1) ? tfLowerBand[j] : tfUpperBand[j];
+        tfDirection[j] = (tvDir == -1) ? 1.0 : -1.0; // +1 bullish, -1 bearish
     }
 
     int start = (prev_calculated > 1) ? (prev_calculated - 1) : 0;
@@ -310,3 +328,4 @@ int OnCalculate(
 
     return rates_total;
 }
+
