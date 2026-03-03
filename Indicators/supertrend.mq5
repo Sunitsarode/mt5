@@ -1,11 +1,9 @@
 //+------------------------------------------------------------------+
 //|                                                   supertrend.mq5 |
-//|                                                Salman Soltaniyan |
-//|                   https://www.mql5.com/en/users/salmansoltaniyan |
 //+------------------------------------------------------------------+
 #property copyright "Salman Soltaniyan"
 #property link      "https://www.mql5.com/en/users/salmansoltaniyan"
-#property version   "1.01"
+#property version   "1.03"
 #property indicator_chart_window
 #property indicator_plots 2
 #property indicator_buffers 3
@@ -16,22 +14,21 @@
 
 #property indicator_type2 DRAW_NONE
 
-//+------------------------------------------------------------------+
-//| DESCRIPTION:                                                     |
-//| The SuperTrend indicator helps identify the current market trend |
-//| and potential reversal points. It plots a line above or below    |
-//| the price based on ATR volatility and serves as dynamic          |
-//| support/resistance levels.                                       |
-//+------------------------------------------------------------------+
 
 //--- Input Parameters ---
-input int    ATRPeriod       = 22;              // Period for ATR calculation
-input double Multiplier      = 3.0;             // ATR multiplier for band calculation
+input int    ATRPeriod       = 51;              // Period for ATR calculation
+input double Multiplier      = 1.5;             // ATR multiplier for band calculation
 input ENUM_APPLIED_PRICE SourcePrice = PRICE_MEDIAN; // Price source for calculations
-input bool   TakeWicksIntoAccount = true;       // Include wicks in calculations
+input bool   TakeWicksIntoAccount = true;            // Include wicks in calculations
+input ENUM_TIMEFRAMES CalcTimeframe = PERIOD_CURRENT; // Timeframe used for calculations
+input int CandleShift = 0;                           // 0=current candle, 1=previous candle
+input double DistanceFactor = 1.0;                   // <1.0 brings line closer to candles
 
 //--- Indicator Handles ---
 int    atrHandle;                               // Handle for ATR indicator
+ENUM_TIMEFRAMES g_calc_tf = PERIOD_CURRENT;
+int g_candle_shift = 0;
+double g_distance_factor = 1.0;
 
 //--- Indicator Buffers ---
 double SuperTrendBuffer[];                      // Main SuperTrend line values
@@ -43,8 +40,20 @@ double SuperTrendDirectionBuffer[];             // Direction buffer (1 = Up, -1 
 //+------------------------------------------------------------------+
 int OnInit()
 {
+    g_calc_tf = (CalcTimeframe == PERIOD_CURRENT) ? (ENUM_TIMEFRAMES)_Period : CalcTimeframe;
+    g_candle_shift = CandleShift;
+    if(g_candle_shift < 0)
+        g_candle_shift = 0;
+    if(g_candle_shift > 1)
+        g_candle_shift = 1;
+    g_distance_factor = DistanceFactor;
+    if(g_distance_factor < 0.05)
+        g_distance_factor = 0.05;
+    if(g_distance_factor > 5.0)
+        g_distance_factor = 5.0;
+
     // Create ATR indicator handle
-    atrHandle = iATR(NULL, 0, ATRPeriod);
+    atrHandle = iATR(_Symbol, g_calc_tf, ATRPeriod);
     if(atrHandle == INVALID_HANDLE)
     {
         Print("Error creating ATR indicator. Error code: ", GetLastError());
@@ -64,6 +73,9 @@ int OnInit()
     ArraySetAsSeries(SuperTrendBuffer, false);
     ArraySetAsSeries(SuperTrendDirectionBuffer, false);
     ArraySetAsSeries(SuperTrendColorBuffer, false);
+
+    PrintFormat("SuperTrend init: ATRPeriod=%d Multiplier=%.2f DistanceFactor=%.2f TF=%s Shift=%d",
+                ATRPeriod, Multiplier, g_distance_factor, EnumToString(g_calc_tf), g_candle_shift);
 
     //--- Initialization is finished ---
     return(INIT_SUCCEEDED);
@@ -104,22 +116,157 @@ int OnCalculate(
     if(rates_total <= 1)
         return 0;
 
-    // Pull ATR values once and map by shift for deterministic calculations.
-    double atrBuffer[];
-    ArraySetAsSeries(atrBuffer, false);
-    int copied = CopyBuffer(atrHandle, 0, 0, rates_total, atrBuffer);
-    if(copied != rates_total)
+    int tf_bars = Bars(_Symbol, g_calc_tf);
+    if(tf_bars <= 1)
         return prev_calculated;
+
+    // Pull calculation-timeframe series once (oldest->newest indexing).
+    double atrBuffer[];
+    double tfOpen[];
+    double tfHigh[];
+    double tfLow[];
+    double tfClose[];
+    ArraySetAsSeries(atrBuffer, false);
+    ArraySetAsSeries(tfOpen, false);
+    ArraySetAsSeries(tfHigh, false);
+    ArraySetAsSeries(tfLow, false);
+    ArraySetAsSeries(tfClose, false);
+
+    int copiedAtr = CopyBuffer(atrHandle, 0, 0, tf_bars, atrBuffer);
+    int copiedOpen = CopyOpen(_Symbol, g_calc_tf, 0, tf_bars, tfOpen);
+    int copiedHigh = CopyHigh(_Symbol, g_calc_tf, 0, tf_bars, tfHigh);
+    int copiedLow = CopyLow(_Symbol, g_calc_tf, 0, tf_bars, tfLow);
+    int copiedClose = CopyClose(_Symbol, g_calc_tf, 0, tf_bars, tfClose);
+    int tf_count = copiedAtr;
+    if(copiedOpen < tf_count) tf_count = copiedOpen;
+    if(copiedHigh < tf_count) tf_count = copiedHigh;
+    if(copiedLow < tf_count) tf_count = copiedLow;
+    if(copiedClose < tf_count) tf_count = copiedClose;
+    if(tf_count <= 0)
+        return prev_calculated;
+
+    // Compute SuperTrend once on the selected timeframe.
+    static double tfSuperTrend[];
+    static double tfDirection[];
+    ArrayResize(tfSuperTrend, tf_count);
+    ArrayResize(tfDirection, tf_count);
+
+    double effective_multiplier = Multiplier * g_distance_factor;
+
+    for(int j = 0; j < tf_count; j++)
+    {
+        double tf_open = tfOpen[j];
+        double tf_high = tfHigh[j];
+        double tf_low = tfLow[j];
+        double tf_close = tfClose[j];
+        double atr = atrBuffer[j];
+
+        if(atr == EMPTY_VALUE || atr <= 0.0)
+        {
+            if(j == 0)
+            {
+                tfSuperTrend[j] = (tf_high + tf_low) * 0.5;
+                tfDirection[j] = 1.0;
+            }
+            else
+            {
+                tfSuperTrend[j] = tfSuperTrend[j - 1];
+                tfDirection[j] = tfDirection[j - 1];
+            }
+            continue;
+        }
+
+        // 1) Source price by selected mode.
+        double srcPrice;
+        switch(SourcePrice)
+        {
+            case PRICE_CLOSE:
+                srcPrice = tf_close;
+                break;
+            case PRICE_OPEN:
+                srcPrice = tf_open;
+                break;
+            case PRICE_HIGH:
+                srcPrice = tf_high;
+                break;
+            case PRICE_LOW:
+                srcPrice = tf_low;
+                break;
+            case PRICE_MEDIAN:
+                srcPrice = (tf_high + tf_low) / 2.0;
+                break;
+            case PRICE_TYPICAL:
+                srcPrice = (tf_high + tf_low + tf_close) / 3.0;
+                break;
+            default: // PRICE_WEIGHTED
+                srcPrice = (tf_high + tf_low + tf_close + tf_close) / 4.0;
+                break;
+        }
+
+        // 2) High/Low source for trend flips.
+        double highPrice = TakeWicksIntoAccount ? tf_high : tf_close;
+        double lowPrice = TakeWicksIntoAccount ? tf_low : tf_close;
+
+        // 3) Long/short stop calculation.
+        double longStop = srcPrice - effective_multiplier * atr;
+        double prevStop = (j > 0 && tfSuperTrend[j - 1] != EMPTY_VALUE) ? tfSuperTrend[j - 1] : longStop;
+        double longStopPrev = prevStop;
+
+        if(longStop > 0.0)
+        {
+            if(tf_open == tf_close && tf_open == tf_low && tf_open == tf_high)
+                longStop = longStopPrev;
+            else
+                longStop = (lowPrice > longStopPrev ? MathMax(longStop, longStopPrev) : longStop);
+        }
+        else
+            longStop = longStopPrev;
+
+        double shortStop = srcPrice + effective_multiplier * atr;
+        double shortStopPrev = prevStop;
+
+        if(shortStop > 0.0)
+        {
+            if(tf_open == tf_close && tf_open == tf_low && tf_open == tf_high)
+                shortStop = shortStopPrev;
+            else
+                shortStop = (highPrice < shortStopPrev ? MathMin(shortStop, shortStopPrev) : shortStop);
+        }
+        else
+            shortStop = shortStopPrev;
+
+        // 4) Direction change logic.
+        int supertrend_dir = 1;
+        if(j > 0 && tfDirection[j - 1] != EMPTY_VALUE)
+            supertrend_dir = (int)tfDirection[j - 1];
+
+        if(supertrend_dir == -1 && highPrice > shortStopPrev)
+            supertrend_dir = 1;
+        else if(supertrend_dir == 1 && lowPrice < longStopPrev)
+            supertrend_dir = -1;
+
+        // 5) Final selected line.
+        if(supertrend_dir == 1)
+        {
+            tfSuperTrend[j] = longStop;
+            tfDirection[j] = 1.0;
+        }
+        else
+        {
+            tfSuperTrend[j] = shortStop;
+            tfDirection[j] = -1.0;
+        }
+    }
 
     int start = (prev_calculated > 1) ? (prev_calculated - 1) : 0;
     if(start < 0)
         start = 0;
 
-    // Calculate from oldest->newest bars in non-series indexing.
+    // Map selected-timeframe SuperTrend to current chart bars.
     for(int i = start; i < rates_total; i++)
     {
-        double atr = atrBuffer[i];
-        if(atr == EMPTY_VALUE || atr <= 0.0)
+        int tf_shift = iBarShift(_Symbol, g_calc_tf, time[i], false);
+        if(tf_shift < 0)
         {
             if(i == 0)
             {
@@ -136,126 +283,30 @@ int OnCalculate(
             continue;
         }
 
-        //--- 1. Calculate source price based on selected price type ---
-        double srcPrice;
-        switch(SourcePrice)
+        tf_shift += g_candle_shift;
+        int tf_index = (tf_count - 1) - tf_shift; // convert series shift -> non-series index
+
+        if(tf_index < 0 || tf_index >= tf_count)
         {
-            case PRICE_CLOSE:
-                srcPrice = close[i];
-                break;
-            case PRICE_OPEN:
-                srcPrice = open[i];
-                break;
-            case PRICE_HIGH:
-                srcPrice = high[i];
-                break;
-            case PRICE_LOW:
-                srcPrice = low[i];
-                break;
-            case PRICE_MEDIAN:
-                srcPrice = (high[i] + low[i]) / 2.0;
-                break;
-            case PRICE_TYPICAL:
-                srcPrice = (high[i] + low[i] + close[i]) / 3.0;
-                break;
-            default: // PRICE_WEIGHTED
-                srcPrice = (high[i] + low[i] + close[i] + close[i]) / 4.0;
-                break;
-        }
-
-        //--- 2. Define high and low prices based on "TakeWicksIntoAccount" setting ---
-        double highPrice = TakeWicksIntoAccount ? high[i] : close[i];
-        double lowPrice = TakeWicksIntoAccount ? low[i] : close[i];
-
-        //--- 3. Calculate long stop (support during uptrend) ---
-        double longStop = srcPrice - Multiplier * atr;
-        double prevStop = (i > 0 && SuperTrendBuffer[i - 1] != EMPTY_VALUE) ? SuperTrendBuffer[i - 1] : longStop;
-        double longStopPrev = prevStop;
-
-        // Adjust long stop based on previous values and current prices
-        if(longStop > 0)
-        {
-            // If it's a doji (all prices are equal), use previous stop value
-            if(open[i] == close[i] && open[i] == low[i] && open[i] == high[i])
-                longStop = longStopPrev;
+            if(i == 0)
+            {
+                SuperTrendBuffer[i] = (high[i] + low[i]) * 0.5;
+                SuperTrendDirectionBuffer[i] = 1.0;
+                SuperTrendColorBuffer[i] = 0.0;
+            }
             else
-                // Trailing stop logic - only move stop up, never down during uptrend
-                longStop = (lowPrice > longStopPrev ? MathMax(longStop, longStopPrev) : longStop);
+            {
+                SuperTrendBuffer[i] = SuperTrendBuffer[i - 1];
+                SuperTrendDirectionBuffer[i] = SuperTrendDirectionBuffer[i - 1];
+                SuperTrendColorBuffer[i] = SuperTrendColorBuffer[i - 1];
+            }
+            continue;
         }
-        else
-            longStop = longStopPrev;
 
-        //--- 4. Calculate short stop (resistance during downtrend) ---
-        double shortStop = srcPrice + Multiplier * atr;
-        double shortStopPrev = prevStop;
-
-        // Adjust short stop based on previous values and current prices
-        if(shortStop > 0)
-        {
-            // If it's a doji (all prices are equal), use previous stop value
-            if(open[i] == close[i] && open[i] == low[i] && open[i] == high[i])
-                shortStop = shortStopPrev;
-            else
-                // Trailing stop logic - only move stop down, never up during downtrend
-                shortStop = (highPrice < shortStopPrev ? MathMin(shortStop, shortStopPrev) : shortStop);
-        }
-        else
-            shortStop = shortStopPrev;
-
-        //--- 5. Determine SuperTrend direction based on price crossing stops ---
-        int supertrend_dir = 1;
-        if(i > 0 && SuperTrendDirectionBuffer[i - 1] != EMPTY_VALUE)
-            supertrend_dir = (int)SuperTrendDirectionBuffer[i - 1];
-
-        // Change from down to up if price breaks above the short stop
-        if(supertrend_dir == -1 && highPrice > shortStopPrev)
-            supertrend_dir = 1;
-        // Change from up to down if price breaks below the long stop
-        else if(supertrend_dir == 1 && lowPrice < longStopPrev)
-            supertrend_dir = -1;
-
-        //--- 6. Set SuperTrend values based on the direction ---
-        if(supertrend_dir == 1)
-        {
-            // Uptrend - use long stop as SuperTrend value
-            SuperTrendBuffer[i] = longStop;
-            SuperTrendDirectionBuffer[i] = 1;
-            SuperTrendColorBuffer[i] = 0;  // Green color for uptrend
-        }
-        else
-        {
-            // Downtrend - use short stop as SuperTrend value
-            SuperTrendBuffer[i] = shortStop;
-            SuperTrendDirectionBuffer[i] = -1;
-            SuperTrendColorBuffer[i] = 1;  // Red color for downtrend
-        }
+        SuperTrendBuffer[i] = tfSuperTrend[tf_index];
+        SuperTrendDirectionBuffer[i] = tfDirection[tf_index];
+        SuperTrendColorBuffer[i] = (tfDirection[tf_index] > 0.0) ? 0.0 : 1.0;
     }
 
     return rates_total;
 }
-//+------------------------------------------------------------------+
-//|                      MIT License                                 |
-//+------------------------------------------------------------------+
-//| Copyright (c) 2024 Salman Soltaniyan                             |
-//|                                                                  |
-//| Permission is hereby granted, free of charge, to any person      |
-//| obtaining a copy of this software and associated documentation   |
-//| files (the "Software"), to deal in the Software without          |
-//| restriction, including without limitation the rights to use,     |
-//| copy, modify, merge, publish, distribute, sublicense, and/or     |
-//| sell copies of the Software, and to permit persons to whom the   |
-//| Software is furnished to do so, subject to the following         |
-//| conditions:                                                      |
-//|                                                                  |
-//| The above copyright notice and this permission notice shall be   |
-//| included in all copies or substantial portions of the Software.  |
-//|                                                                  |
-//| THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,  |
-//| EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES  |
-//| OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND         |
-//| NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT      |
-//| HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,     |
-//| WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING     |
-//| FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR    |
-//| OTHER DEALINGS IN THE SOFTWARE.                                  |
-//+------------------------------------------------------------------+

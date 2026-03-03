@@ -56,7 +56,6 @@ input double SellLotSize = 0.01;
 input double SellLotStep = 0.01;
 input int SellMaxEntries = 0;
 
-input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
 
 input int RSIDirectionLookbackBars = 3;
 input double RSISidewaysDelta = 1.0; 
@@ -71,8 +70,9 @@ bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=u
 input bool SupetrendBasedSL = false; 
 
 // Trading logic (common)
+input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
+input double UpDownStep = 0.025;     
 input double TargetPercent = 0.175;      
-input double UpDownStep = 0.025;         
 input bool SetTargetWithEntry = false;  // brokerside SetTargetWithEntry
 input double TrailingTargetPercent = 0.02; //TrailingTargetPercent (0 disables)
 
@@ -1329,7 +1329,7 @@ void ProcessSell(const bool hedging, const double bid, const double ask, const d
    if(!SellEntry)
       return;
 
-   if(UseSuperTrend && !IsSuperTrendBearishH1(1))
+   if(UseSuperTrend && !IsSuperTrendBearishH1(0))
       return;
    if(SellRSIDirectionMode > 0)
    {
