@@ -22,13 +22,11 @@ input ENUM_APPLIED_PRICE SourcePrice = PRICE_MEDIAN; // Price source for calcula
 input bool   TakeWicksIntoAccount = false;            // Include wicks in calculations
 input ENUM_TIMEFRAMES CalcTimeframe = PERIOD_CURRENT; // Timeframe used for calculations
 input int CandleShift = 0;                           // 0=current candle, 1=previous candle
-input double DistanceFactor = 1.0;                   // <1.0 brings line closer to candles
 
 //--- Indicator Handles ---
 int    atrHandle;                               // Handle for ATR indicator
 ENUM_TIMEFRAMES g_calc_tf = PERIOD_CURRENT;
 int g_candle_shift = 0;
-double g_distance_factor = 1.0;
 
 //--- Indicator Buffers ---
 double SuperTrendBuffer[];                      // Main SuperTrend line values
@@ -46,11 +44,6 @@ int OnInit()
         g_candle_shift = 0;
     if(g_candle_shift > 1)
         g_candle_shift = 1;
-    g_distance_factor = DistanceFactor;
-    if(g_distance_factor < 0.05)
-        g_distance_factor = 0.05;
-    if(g_distance_factor > 5.0)
-        g_distance_factor = 5.0;
 
     // Create ATR indicator handle
     atrHandle = iATR(_Symbol, g_calc_tf, ATRPeriod);
@@ -74,8 +67,8 @@ int OnInit()
     ArraySetAsSeries(SuperTrendDirectionBuffer, false);
     ArraySetAsSeries(SuperTrendColorBuffer, false);
 
-    PrintFormat("SuperTrend init: ATRPeriod=%d Multiplier=%.2f DistanceFactor=%.2f TF=%s Shift=%d",
-                ATRPeriod, Multiplier, g_distance_factor, EnumToString(g_calc_tf), g_candle_shift);
+    PrintFormat("SuperTrend init: ATRPeriod=%d Multiplier=%.2f TF=%s Shift=%d",
+                ATRPeriod, Multiplier, EnumToString(g_calc_tf), g_candle_shift);
 
     //--- Initialization is finished ---
     return(INIT_SUCCEEDED);
@@ -155,8 +148,6 @@ int OnCalculate(
     ArrayResize(tfUpperBand, tf_count);
     ArrayResize(tfLowerBand, tf_count);
 
-    double effective_multiplier = Multiplier * g_distance_factor;
-
     for(int j = 0; j < tf_count; j++)
     {
         double tf_open = tfOpen[j];
@@ -213,8 +204,8 @@ int OnCalculate(
         }
 
         // 2) Compute raw bands for this bar.
-        double lowerBandRaw = srcPrice - effective_multiplier * atr;
-        double upperBandRaw = srcPrice + effective_multiplier * atr;
+        double lowerBandRaw = srcPrice - Multiplier * atr;
+        double upperBandRaw = srcPrice + Multiplier * atr;
 
         if(j == 0)
         {

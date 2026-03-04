@@ -2,7 +2,7 @@
 //|      
 // Dual-side EA: buys/sells with optional Sumit score + 2x SuperTrend filters.
 // Supports staged entries, per-side lot scaling, and TP/trailing management.
-// On SuperTrend flip, optional protection sets opposite-side SL near entry (or closes on modify failure).
+// On SuperTrend-1 flip, closes opposite-side managed positions.
 
 //
 //+------------------------------------------------------------------+
@@ -14,18 +14,18 @@
 
 // Inputs for Sumit_RSI_Score_Indicator
  int Rsi1hPeriod = 51;
- int SumitMaBuyThreshold = 30;
- int SumitMaSellThreshold = 70;
- int Rsi1hBuyThreshold = 40;
- int Rsi1hSellThreshold = 55;
+ int SumitMaBuy = 30;
+ int SumitMaSell = 70;
+ int Rsi1hBuy = 40;
+ int Rsi1hSell = 60;
  int SumitSma3Period = 3;
  int SumitSma201Period = 201;
  int SumitRsiPeriod = 7;
 
-input int EntryScoreThresholdBuy = 90;   // Buy condition: score <= threshold
-input int EntryScoreThresholdSell = 10;  // Sell condition: score >= threshold
+input int EntryScoreBuy = 30;   // Buy condition: score <= 
+input int EntryScoreSell = 70;  // Sell condition: score >= 
 input bool Use_Sumit_Score = true;
-// Side enable + score threshold
+// Side enable + score 
 input bool BuyEntry = true;
 input bool SellEntry = true;
 
@@ -33,23 +33,20 @@ input bool SellEntry = true;
 // SuperTrend filter (runtime-selectable timeframe)
 input bool UseSuperTrend1 = true;
 input int ST1AtrP = 51;
-input double ST1Mult = 0.5;
-input ENUM_TIMEFRAMES ST1Timeframe = PERIOD_CURRENT; // e.g. PERIOD_H1
+input double ST1Mult = 1.5;
+input ENUM_TIMEFRAMES ST1Timeframe = PERIOD_CURRENT; 
 
-input bool UseSuperTrend2 = true;
+input bool UseSuperTrend2 = false;
 input int ST2AtrP = 51;
-input double ST2Mult = 0.5;
+input double ST2Mult =1;
 input ENUM_TIMEFRAMES ST2Timeframe = PERIOD_M30;
-input bool SupetrendBasedSL = true; // 1. Close opposite-direction trades when SuperTrend flips 2. Set target of opp-directioned trades to entry point (Zero Loss) 0r 0.001%
-input int SelectSTbasedSL = 0; // 0=any (ST-1 or ST-2), 1=ST-1 only, 2=ST-2 only
-input bool SupetrendBasedSLCloseNow = true; // true=immediate close on selected ST flip; if target=0 then apply break-even SL instead
-input double SupetrendBasedSLTarget = 0.0; // 0=entry, -0.001 => buy SL=entry-0.001%, sell SL=entry+0.001%
+input bool SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend-1 flips.
 
 input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
-input bool SupertrendTakeWicksIntoAccount = true; // true=use wick highs/lows, false=use candle body values
+input bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
+input int SupertrendCandleShift = 0; // 0=current bar, 1=previous closed bar
 
 // Trading logic (common)
-input double MinTargetPoints = 10.0;    // Minimum TP distance in points
 input double TargetPercent = 0.021;      // TP distance in percent of entry price
 input bool SetTargetWithEntry = false;  // Place broker TP in the entry request
 input double TrailingTargetPips = 0.002; // Used only when SetTargetWithEntry=false, interpreted as percent (0 disables trailing)
@@ -110,7 +107,7 @@ int sumitScoreHandle = INVALID_HANDLE;
 int supertrend1Handle = INVALID_HANDLE;
 int supertrend2Handle = INVALID_HANDLE;
 int supertrend1_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
-int supertrend2_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
+int g_supertrend_shift = 0;
 
 // Cached symbol properties (faster than repeated SymbolInfoDouble calls)
 double g_vol_min = 0.0;
@@ -165,9 +162,10 @@ double CalculatePipSize()
 
 double CalculateTargetDistance(const double entry_price)
 {
-   double minDist = MinTargetPoints * g_point;
-   double pctDist = entry_price * (TargetPercent / 100.0);
-   return MathMax(minDist, pctDist);
+   double pct_distance = entry_price * (TargetPercent / 100.0);
+   if(pct_distance < g_point)
+      pct_distance = g_point;
+   return pct_distance;
 }
 
 double CalculateTargetPriceBuy(const double entry_price)
@@ -189,7 +187,10 @@ double CalculateTrailingDistance(const double reference_price)
 
 double CalculateStepDistance(const double reference_price)
 {
-   return reference_price * (TargetPercent / 100.0);
+   double pct_distance = reference_price * (TargetPercent / 100.0);
+   if(pct_distance < g_point)
+      pct_distance = g_point;
+   return pct_distance;
 }
 
 bool GetScoreValue(const int shift, double &score)
@@ -269,6 +270,26 @@ bool IsSuperTrendBullish(const int shift)
 bool IsSuperTrendBearish(const int shift)
 {
    return (GetCombinedSuperTrendDirection(shift) < 0);
+}
+
+bool IsSuperTrend1BullishFlip()
+{
+   if(!UseSuperTrend1)
+      return false;
+
+   int current_direction = GetSuperTrendDirectionFromHandle(supertrend1Handle, g_supertrend_shift);
+   int previous_direction = GetSuperTrendDirectionFromHandle(supertrend1Handle, g_supertrend_shift + 1);
+   return (current_direction > 0 && previous_direction < 0);
+}
+
+bool IsSuperTrend1BearishFlip()
+{
+   if(!UseSuperTrend1)
+      return false;
+
+   int current_direction = GetSuperTrendDirectionFromHandle(supertrend1Handle, g_supertrend_shift);
+   int previous_direction = GetSuperTrendDirectionFromHandle(supertrend1Handle, g_supertrend_shift + 1);
+   return (current_direction < 0 && previous_direction > 0);
 }
 
 bool IsLastCandleBreakConditionMet(const double price, const string break_input, const string type_input, const bool is_buy)
@@ -377,6 +398,42 @@ void UpdateLastEntryFromOpenBuy()
    }
 }
 
+void CompactClosedTranchesBuy()
+{
+   int total = ArraySize(buy_tranches);
+   if(total <= 0)
+      return;
+
+   int open_count = 0;
+   for(int i = 0; i < total; i++)
+   {
+      if(!buy_tranches[i].closed)
+         open_count++;
+   }
+
+   if(open_count == total)
+      return;
+
+   if(open_count == 0)
+   {
+      ArrayResize(buy_tranches, 0);
+      return;
+   }
+
+   Tranche active[];
+   ArrayResize(active, open_count);
+   int idx = 0;
+   for(int i = 0; i < total; i++)
+   {
+      if(!buy_tranches[i].closed)
+         active[idx++] = buy_tranches[i];
+   }
+
+   ArrayResize(buy_tranches, open_count);
+   for(int i = 0; i < open_count; i++)
+      buy_tranches[i] = active[i];
+}
+
 void EnsureServerTargetsForOpenPositionsBuy(const bool hedging)
 {
    if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
@@ -465,6 +522,7 @@ void SyncTranchesBuy(const bool hedging)
    }
 
    UpdateLastEntryFromOpenBuy();
+   CompactClosedTranchesBuy();
 }
 void RebuildTranchesFromPositionsBuy(const bool hedging)
 {
@@ -732,6 +790,42 @@ void UpdateLastEntryFromOpenSell()
    }
 }
 
+void CompactClosedTranchesSell()
+{
+   int total = ArraySize(sell_tranches);
+   if(total <= 0)
+      return;
+
+   int open_count = 0;
+   for(int i = 0; i < total; i++)
+   {
+      if(!sell_tranches[i].closed)
+         open_count++;
+   }
+
+   if(open_count == total)
+      return;
+
+   if(open_count == 0)
+   {
+      ArrayResize(sell_tranches, 0);
+      return;
+   }
+
+   Tranche active[];
+   ArrayResize(active, open_count);
+   int idx = 0;
+   for(int i = 0; i < total; i++)
+   {
+      if(!sell_tranches[i].closed)
+         active[idx++] = sell_tranches[i];
+   }
+
+   ArrayResize(sell_tranches, open_count);
+   for(int i = 0; i < open_count; i++)
+      sell_tranches[i] = active[i];
+}
+
 void EnsureServerTargetsForOpenPositionsSell(const bool hedging)
 {
    if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
@@ -820,6 +914,7 @@ void SyncTranchesSell(const bool hedging)
    }
 
    UpdateLastEntryFromOpenSell();
+   CompactClosedTranchesSell();
 }
 void RebuildTranchesFromPositionsSell(const bool hedging)
 {
@@ -1061,38 +1156,23 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
    if(!BuyEntry)
       return;
 
-   if((UseSuperTrend1 || UseSuperTrend2) && !IsSuperTrendBullish(1))
+   if(!UseSuperTrend1 || !IsSuperTrendBullish(g_supertrend_shift))
       return;
 
    int openCount = OpenTrancheCountBuy();
+   if(openCount > 0)
+      return;
+
    bool scoreOk = true;
    if(Use_Sumit_Score)
    {
-      int scoreTrigger = EntryScoreThresholdBuy;
-      if(EntryScoreThresholdBuy < 0)
-         scoreTrigger = 50 + (EntryScoreThresholdBuy * 10);
+      int scoreTrigger = EntryScoreBuy;
+      if(EntryScoreBuy < 0)
+         scoreTrigger = 50 + (EntryScoreBuy * 10);
       scoreOk = (score <= scoreTrigger);
    }
 
-   if(openCount == 0)
-   {
-      if(!scoreOk)
-         return;
-
-      if(!IsLastCandleBreakConditionMet(bid, chk_last_candle_breaks_buy, chk_last_candle_type_buy, true))
-         return;
-
-      if(buy_last_entry_price_ref > 0.0)
-      {
-         if(MathAbs(bid - buy_last_entry_price_ref) < CalculateStepDistance(buy_last_entry_price_ref))
-            return;
-      }
-
-      TryOpenEntryBuy(ask, BuyLotSize, hedging);
-      return;
-   }
-
-   if(BuyMaxEntries > 0 && openCount >= BuyMaxEntries)
+   if(!IsSuperTrend1BullishFlip())
       return;
 
    if(!scoreOk)
@@ -1101,14 +1181,13 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
    if(!IsLastCandleBreakConditionMet(bid, chk_last_candle_breaks_buy, chk_last_candle_type_buy, true))
       return;
 
-   if(buy_last_entry_price_open > 0.0 && bid <= (buy_last_entry_price_open - CalculateStepDistance(buy_last_entry_price_open)))
+   if(buy_last_entry_price_ref > 0.0)
    {
-      double nextLot = buy_last_entry_lot;
-      if(nextLot <= 0.0)
-         nextLot = BuyLotSize;
-      nextLot += BuyLotStep;
-      TryOpenEntryBuy(ask, nextLot, hedging);
+      if(MathAbs(bid - buy_last_entry_price_ref) < CalculateStepDistance(buy_last_entry_price_ref))
+         return;
    }
+
+   TryOpenEntryBuy(ask, BuyLotSize, hedging);
 }
 
 void ProcessSell(const bool hedging, const double bid, const double ask, const double score)
@@ -1116,38 +1195,23 @@ void ProcessSell(const bool hedging, const double bid, const double ask, const d
    if(!SellEntry)
       return;
 
-   if((UseSuperTrend1 || UseSuperTrend2) && !IsSuperTrendBearish(1))
+   if(!UseSuperTrend1 || !IsSuperTrendBearish(g_supertrend_shift))
       return;
 
    int openCount = OpenTrancheCountSell();
+   if(openCount > 0)
+      return;
+
    bool scoreOk = true;
    if(Use_Sumit_Score)
    {
-      int scoreTrigger = EntryScoreThresholdSell;
-      if(EntryScoreThresholdSell < 0)
-         scoreTrigger = 50 + (EntryScoreThresholdSell * 10);
+      int scoreTrigger = EntryScoreSell;
+      if(EntryScoreSell < 0)
+         scoreTrigger = 50 + (EntryScoreSell * 10);
       scoreOk = (score >= scoreTrigger);
    }
 
-   if(openCount == 0)
-   {
-      if(!scoreOk)
-         return;
-
-      if(!IsLastCandleBreakConditionMet(ask, chk_last_candle_breaks_sell, chk_last_candle_type_sell, false))
-         return;
-
-      if(sell_last_entry_price_ref > 0.0)
-      {
-         if(MathAbs(ask - sell_last_entry_price_ref) < CalculateStepDistance(sell_last_entry_price_ref))
-            return;
-      }
-
-      TryOpenEntrySell(bid, SellLotSize, hedging);
-      return;
-   }
-
-   if(SellMaxEntries > 0 && openCount >= SellMaxEntries)
+   if(!IsSuperTrend1BearishFlip())
       return;
 
    if(!scoreOk)
@@ -1156,14 +1220,13 @@ void ProcessSell(const bool hedging, const double bid, const double ask, const d
    if(!IsLastCandleBreakConditionMet(ask, chk_last_candle_breaks_sell, chk_last_candle_type_sell, false))
       return;
 
-   if(sell_last_entry_price_open > 0.0 && ask >= (sell_last_entry_price_open + CalculateStepDistance(sell_last_entry_price_open)))
+   if(sell_last_entry_price_ref > 0.0)
    {
-      double nextLot = sell_last_entry_lot;
-      if(nextLot <= 0.0)
-         nextLot = SellLotSize;
-      nextLot += SellLotStep;
-      TryOpenEntrySell(bid, nextLot, hedging);
+      if(MathAbs(ask - sell_last_entry_price_ref) < CalculateStepDistance(sell_last_entry_price_ref))
+         return;
    }
+
+   TryOpenEntrySell(bid, SellLotSize, hedging);
 }
 
 int CloseAllManagedPositions(const ulong magic, const int position_type, const string reason)
@@ -1197,169 +1260,30 @@ int CloseAllManagedPositions(const ulong magic, const int position_type, const s
    return closed_count;
 }
 
-int ApplySupertrendFlipSLToManagedPositions(const ulong magic,
-                                            const int position_type,
-                                            const bool hedging,
-                                            const double signed_target_percent,
-                                            const string reason)
-{
-   int protected_count = 0;
-   int fallback_closed_count = 0;
-   int ptotal = PositionsTotal();
-
-   for(int i = ptotal - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0 || !PositionSelectByTicket(ticket))
-         continue;
-      if(!IsManagedPosition(magic, position_type))
-         continue;
-
-      double entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
-      if(entry_price <= 0.0)
-         continue;
-
-      double sl_price = entry_price;
-      if(position_type == POSITION_TYPE_BUY)
-         sl_price = entry_price * (1.0 + (signed_target_percent / 100.0));
-      else
-         sl_price = entry_price * (1.0 - (signed_target_percent / 100.0));
-      sl_price = NormalizePrice(sl_price);
-
-      double current_tp = PositionGetDouble(POSITION_TP);
-
-      trade.SetExpertMagicNumber(magic);
-      trade.SetDeviationInPoints(Deviation);
-
-      bool modified = hedging
-                      ? trade.PositionModify(ticket, sl_price, current_tp)
-                      : trade.PositionModify(_Symbol, sl_price, current_tp);
-
-      if(modified)
-      {
-         protected_count++;
-         continue;
-      }
-
-      PrintFormat("%s SL set failed. ticket=%I64u entry=%.5f sl=%.5f retcode=%d (%s)",
-                  reason, ticket, entry_price, sl_price, trade.ResultRetcode(), trade.ResultRetcodeDescription());
-
-      if(trade.PositionClose(ticket))
-         fallback_closed_count++;
-      else
-      {
-         PrintFormat("%s fallback close failed. ticket=%I64u retcode=%d (%s)",
-                     reason, ticket, trade.ResultRetcode(), trade.ResultRetcodeDescription());
-      }
-   }
-
-   if(protected_count > 0)
-      PrintFormat("%s SL-protected count=%d magic=%I64u targetPercent=%.6f",
-                  reason, protected_count, magic, signed_target_percent);
-
-   if(fallback_closed_count > 0)
-      PrintFormat("%s fallback close count=%d magic=%I64u",
-                  reason, fallback_closed_count, magic);
-
-   return(protected_count + fallback_closed_count);
-}
-
 void ApplySupertrendBasedSL(const bool hedging)
 {
-   if(!(UseSuperTrend1 || UseSuperTrend2) || !SupetrendBasedSL)
+   if(!SupetrendBasedSL || !UseSuperTrend1)
       return;
 
-   int selected = SelectSTbasedSL;
-   if(selected < 0 || selected > 2)
-      selected = 0;
+   int st1_current = GetSuperTrendDirectionFromHandle(supertrend1Handle, g_supertrend_shift);
+   if(st1_current == 0)
+      return;
 
-   int st1_current = 0;
-   int st2_current = 0;
-   if(UseSuperTrend1)
-      st1_current = GetSuperTrendDirectionFromHandle(supertrend1Handle, 1);
-   if(UseSuperTrend2)
-      st2_current = GetSuperTrendDirectionFromHandle(supertrend2Handle, 1);
+   bool st1_flipped = (supertrend1_last_direction != 0 && st1_current != supertrend1_last_direction);
+   supertrend1_last_direction = st1_current;
 
-   bool st1_flipped = false;
-   bool st2_flipped = false;
+   if(!st1_flipped)
+      return;
 
-   if(UseSuperTrend1 && st1_current != 0 && supertrend1_last_direction != 0 && st1_current != supertrend1_last_direction)
-      st1_flipped = true;
-   if(UseSuperTrend2 && st2_current != 0 && supertrend2_last_direction != 0 && st2_current != supertrend2_last_direction)
-      st2_flipped = true;
-
-   int flip_direction = 0;
-   if(selected == 1)
+   if(st1_current > 0)
    {
-      if(st1_flipped)
-         flip_direction = st1_current;
-   }
-   else if(selected == 2)
-   {
-      if(st2_flipped)
-         flip_direction = st2_current;
+      if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend-1 flipped bullish: closing sells") > 0)
+         SyncTranchesSell(hedging);
    }
    else
    {
-      // Any selected: trigger on first clear flip signal. If both flip opposite, skip as ambiguous.
-      if(st1_flipped && st2_flipped)
-      {
-         if(st1_current == st2_current)
-            flip_direction = st1_current;
-      }
-      else if(st1_flipped)
-         flip_direction = st1_current;
-      else if(st2_flipped)
-         flip_direction = st2_current;
-   }
-
-   if(st1_current != 0)
-      supertrend1_last_direction = st1_current;
-   if(st2_current != 0)
-      supertrend2_last_direction = st2_current;
-
-   if(flip_direction == 0)
-      return;
-
-   // Backward-compatible override: closeNow=true with target=0.0 means move SL to entry (break-even),
-   // which is a common requested setup for SuperTrend flip protection.
-   bool use_close_now = SupetrendBasedSLCloseNow;
-   if(use_close_now && MathAbs(SupetrendBasedSLTarget) <= 1e-12)
-      use_close_now = false;
-
-   if(flip_direction > 0)
-   {
-      if(use_close_now)
-      {
-         if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
-            SyncTranchesSell(hedging);
-      }
-      else
-      {
-         if(ApplySupertrendFlipSLToManagedPositions(SellMagicNumber,
-                                                    POSITION_TYPE_SELL,
-                                                    hedging,
-                                                    SupetrendBasedSLTarget,
-                                                    "SuperTrend flipped bullish: protecting sells") > 0)
-            SyncTranchesSell(hedging);
-      }
-   }
-   else
-   {
-      if(use_close_now)
-      {
-         if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
-            SyncTranchesBuy(hedging);
-      }
-      else
-      {
-         if(ApplySupertrendFlipSLToManagedPositions(BuyMagicNumber,
-                                                    POSITION_TYPE_BUY,
-                                                    hedging,
-                                                    SupetrendBasedSLTarget,
-                                                    "SuperTrend flipped bearish: protecting buys") > 0)
-            SyncTranchesBuy(hedging);
-      }
+      if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend-1 flipped bearish: closing buys") > 0)
+         SyncTranchesBuy(hedging);
    }
 }
 
@@ -1384,6 +1308,18 @@ int OnInit()
       return(INIT_FAILED);
    }
 
+   if(TargetPercent <= 0.0)
+   {
+      Print("Invalid TargetPercent. Set TargetPercent > 0.");
+      return(INIT_PARAMETERS_INCORRECT);
+   }
+
+   g_supertrend_shift = SupertrendCandleShift;
+   if(g_supertrend_shift < 0)
+      g_supertrend_shift = 0;
+   if(g_supertrend_shift > 1)
+      g_supertrend_shift = 1;
+
    if(Use_Sumit_Score)
    {
       sumitScoreHandle = iCustom(
@@ -1391,10 +1327,10 @@ int OnInit()
          PERIOD_CURRENT,
          "Sumit_RSI_Score_Indicator",
          Rsi1hPeriod,
-         SumitMaBuyThreshold,
-         SumitMaSellThreshold,
-         Rsi1hBuyThreshold,
-         Rsi1hSellThreshold,
+         SumitMaBuy,
+         SumitMaSell,
+         Rsi1hBuy,
+         Rsi1hSell,
          SumitSma3Period,
          SumitSma201Period,
          SumitRsiPeriod
@@ -1411,12 +1347,14 @@ int OnInit()
    {
       supertrend1Handle = iCustom(
          _Symbol,
-         ST1Timeframe,
+         PERIOD_CURRENT,
          "supertrend",
          ST1AtrP,
          ST1Mult,
          SupertrendSourcePrice,
-         SupertrendTakeWicksIntoAccount
+         SupertrendTakeWicksIntoAccount,
+         ST1Timeframe,
+         g_supertrend_shift
       );
 
       if(supertrend1Handle == INVALID_HANDLE)
@@ -1432,12 +1370,14 @@ int OnInit()
    {
       supertrend2Handle = iCustom(
          _Symbol,
-         ST2Timeframe,
+         PERIOD_CURRENT,
          "supertrend",
          ST2AtrP,
          ST2Mult,
          SupertrendSourcePrice,
-         SupertrendTakeWicksIntoAccount
+         SupertrendTakeWicksIntoAccount,
+         ST2Timeframe,
+         g_supertrend_shift
       );
 
       if(supertrend2Handle == INVALID_HANDLE)
@@ -1450,9 +1390,7 @@ int OnInit()
    }
 
    if(UseSuperTrend1)
-      supertrend1_last_direction = GetSuperTrendDirectionFromHandle(supertrend1Handle, 1);
-   if(UseSuperTrend2)
-      supertrend2_last_direction = GetSuperTrendDirectionFromHandle(supertrend2Handle, 1);
+      supertrend1_last_direction = GetSuperTrendDirectionFromHandle(supertrend1Handle, g_supertrend_shift);
 
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
@@ -1482,11 +1420,16 @@ int OnInit()
                EnumToString(ST1Timeframe),
                UseSuperTrend2 ? "on" : "off",
                EnumToString(ST2Timeframe));
-   PrintFormat("SuperTrend flip protection: enabled=%s select=%d closeNow=%s targetPercent=%.6f",
-               SupetrendBasedSL ? "true" : "false",
-               SelectSTbasedSL,
-               SupetrendBasedSLCloseNow ? "true" : "false",
-               SupetrendBasedSLTarget);
+   PrintFormat("SuperTrend params: ATR1=%d Mult1=%.2f ATR2=%d Mult2=%.2f Source=%d Wicks=%s Shift=%d",
+               ST1AtrP,
+               ST1Mult,
+               ST2AtrP,
+               ST2Mult,
+               (int)SupertrendSourcePrice,
+               SupertrendTakeWicksIntoAccount ? "true" : "false",
+               g_supertrend_shift);
+   PrintFormat("SuperTrend-1 flip close: enabled=%s",
+               SupetrendBasedSL ? "true" : "false");
 
    return(INIT_SUCCEEDED);
 }
@@ -1517,7 +1460,6 @@ void OnTick()
    RebuildTranchesFromPositionsSell(hedging);
    EnsureServerTargetsForOpenPositionsBuy(hedging);
    EnsureServerTargetsForOpenPositionsSell(hedging);
-   ApplySupertrendBasedSL(hedging);
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -1535,6 +1477,8 @@ void OnTick()
          return;
       last_bar_time = bar_time;
    }
+
+   ApplySupertrendBasedSL(hedging);
 
    double score = EMPTY_VALUE;
    if(Use_Sumit_Score && !GetScoreValue(1, score))

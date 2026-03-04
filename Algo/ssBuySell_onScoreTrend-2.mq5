@@ -1,4 +1,4 @@
-//+---------------------ssBuySell_Magic_HLentry_2_SStarget.mq5------------------------------------+
+//+---------------------ssBuySell_onScore+Score2+SuperTrend+TraillingScore.mq5------------------------------------+
 //|
 //   Combined Buy + Sell strategy with score + Sumit/Signal threshold entry/exit                  |
 //| Uses external indicators: Sumit_RSI_Score_Indicator + optional SuperTrend filter              |
@@ -19,6 +19,8 @@
  int SumitSma3Period = 3;
  int SumitSma201Period = 201;
  int SumitRsiPeriod = 7;
+input ENUM_TIMEFRAMES SumitScore_2Period = PERIOD_M15;
+
 // BUYEntrySumitRSI = -1=use BUYEntryScore, 0=disabled, 1..100=manual, BUY entry when SumitRSI <= level
 //BuyRSIDirectionMode RSI direction modes: 0=disabled, 1=RisingOrSideways, 2=FallingOrSideways, 3=RisingOnly, 4=FallingOnly, 5=SidewaysOnly
 //SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
@@ -31,6 +33,8 @@
 input bool BuyEntry = true;
 input int BUYEntryScore = 20; 
 input int BUYExitScore = 60;   
+input int BUYEntryScore2 = 20;
+input int BUYExitScore2 = 60;
 input int BUYEntrySumitRSI = 0;    
 input int BUYExitSumitRSI = 0;     
 input int BUYEntrySignalMA3 = 0;   
@@ -45,6 +49,8 @@ input int BuyMaxEntries = 0;
 input bool SellEntry = true;
 input int SELLEntryScore = 80;  
 input int SELLExitScore = 40;  
+input int SELLEntryScore2 = 80;
+input int SELLExitScore2 = 40;
 input int SELLEntrySumitRSI =0;   
 input int SELLExitSumitRSI = 0;    
 input int SELLEntrySignalMA3 = 0;  
@@ -56,7 +62,7 @@ input double SellLotSize = 0.01;
 input double SellLotStep = 0.01;
 input int SellMaxEntries = 0;
 
-input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
+
 
 input int RSIDirectionLookbackBars = 3;
 input double RSISidewaysDelta = 1.0; 
@@ -75,14 +81,15 @@ input double TargetPercent = 0.175;
 input double UpDownStep = 0.025;         
 input bool SetTargetWithEntry = false;  // brokerside SetTargetWithEntry
 input double TrailingTargetPercent = 0.02; //TrailingTargetPercent (0 disables)
+input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
 
 bool RecoverExistingMagicPositions = true; 
 
 
 input ulong BuyMagicNumber = 1051;
 input ulong SellMagicNumber = 2051;
-input int Deviation = 30;
-input bool UseNewBar = true;
+int Deviation = 30;
+input bool UseNewBar = false;
 
 CTrade trade;
 
@@ -116,6 +123,7 @@ double sell_last_entry_price_ref = 0.0;
 datetime last_bar_time = 0;
 
 int sumitScoreHandle = INVALID_HANDLE;
+int sumitScore2Handle = INVALID_HANDLE;
 int supertrendH1Handle = INVALID_HANDLE;
 int supertrend_last_direction = 0; // +1 bullish, -1 bearish, 0 unknown
 
@@ -133,6 +141,10 @@ int g_buy_score_trail_stop = 0;
 int g_buy_score_trail_next = 0;
 int g_sell_score_trail_stop = 0;
 int g_sell_score_trail_next = 0;
+int g_buy_score2_trail_stop = 0;
+int g_buy_score2_trail_next = 0;
+int g_sell_score2_trail_stop = 0;
+int g_sell_score2_trail_next = 0;
 
 //+------------------------------------------------------------------+
 //| Utility                                                          |
@@ -232,6 +244,23 @@ bool GetScoreValue(const int shift, double &score)
    return true;
 }
 
+bool GetScore2Value(const int shift, double &score)
+{
+   if(sumitScore2Handle == INVALID_HANDLE)
+      return false;
+
+   double score_value[1];
+   int copied = CopyBuffer(sumitScore2Handle, 4, shift, 1, score_value);
+   if(copied != 1)
+      return false;
+
+   if(score_value[0] == EMPTY_VALUE)
+      return false;
+
+   score = score_value[0];
+   return true;
+}
+
 int NormalizeScoreLevel(const int level)
 {
    if(level < 0)
@@ -279,7 +308,19 @@ void ResetSellScoreTrailState()
    g_sell_score_trail_next = 0;
 }
 
-bool EvaluateBuyScoreExit(const double score, const int raw_target, string &reason)
+void ResetBuyScore2TrailState()
+{
+   g_buy_score2_trail_stop = 0;
+   g_buy_score2_trail_next = 0;
+}
+
+void ResetSellScore2TrailState()
+{
+   g_sell_score2_trail_stop = 0;
+   g_sell_score2_trail_next = 0;
+}
+
+bool EvaluateBuyScoreExit(const double score, const int raw_target, int &trail_stop, int &trail_next, const string label, string &reason)
 {
    if(!EntryScoreSLTrail)
    {
@@ -303,42 +344,42 @@ bool EvaluateBuyScoreExit(const double score, const int raw_target, string &reas
       return false;
    }
 
-   if(g_buy_score_trail_stop <= 0)
+   if(trail_stop <= 0)
    {
       if(score >= trail_start)
       {
-         g_buy_score_trail_stop = trail_start;
-         g_buy_score_trail_next = trail_start + 10;
-         PrintFormat("Buy score trail started. stop=%d next=%d score=%.2f",
-                     g_buy_score_trail_stop, g_buy_score_trail_next, score);
+         trail_stop = trail_start;
+         trail_next = trail_start + 10;
+         PrintFormat("%s trail started. stop=%d next=%d score=%.2f",
+                     label, trail_stop, trail_next, score);
       }
       return false;
    }
 
-   while(g_buy_score_trail_next > 0 && g_buy_score_trail_next <= 90 && score >= g_buy_score_trail_next)
+   while(trail_next > 0 && trail_next <= 90 && score >= trail_next)
    {
-      g_buy_score_trail_stop = g_buy_score_trail_next;
-      g_buy_score_trail_next = (g_buy_score_trail_stop >= 90) ? 0 : (g_buy_score_trail_stop + 10);
-      PrintFormat("Buy score trail advanced. stop=%d next=%d score=%.2f",
-                  g_buy_score_trail_stop, g_buy_score_trail_next, score);
+      trail_stop = trail_next;
+      trail_next = (trail_stop >= 90) ? 0 : (trail_stop + 10);
+      PrintFormat("%s trail advanced. stop=%d next=%d score=%.2f",
+                  label, trail_stop, trail_next, score);
    }
 
-   if(g_buy_score_trail_stop >= 90)
+   if(trail_stop >= 90)
    {
       reason = StringFormat("trail finished at 90 (score %.2f)", score);
       return true;
    }
 
-   if(score < g_buy_score_trail_stop)
+   if(score < trail_stop)
    {
-      reason = StringFormat("trail stop hit (score %.2f < %d)", score, g_buy_score_trail_stop);
+      reason = StringFormat("trail stop hit (score %.2f < %d)", score, trail_stop);
       return true;
    }
 
    return false;
 }
 
-bool EvaluateSellScoreExit(const double score, const int raw_target, string &reason)
+bool EvaluateSellScoreExit(const double score, const int raw_target, int &trail_stop, int &trail_next, const string label, string &reason)
 {
    if(!EntryScoreSLTrail)
    {
@@ -362,35 +403,35 @@ bool EvaluateSellScoreExit(const double score, const int raw_target, string &rea
       return false;
    }
 
-   if(g_sell_score_trail_stop <= 0)
+   if(trail_stop <= 0)
    {
       if(score <= trail_start)
       {
-         g_sell_score_trail_stop = trail_start;
-         g_sell_score_trail_next = trail_start - 10;
-         PrintFormat("Sell score trail started. stop=%d next=%d score=%.2f",
-                     g_sell_score_trail_stop, g_sell_score_trail_next, score);
+         trail_stop = trail_start;
+         trail_next = trail_start - 10;
+         PrintFormat("%s trail started. stop=%d next=%d score=%.2f",
+                     label, trail_stop, trail_next, score);
       }
       return false;
    }
 
-   while(g_sell_score_trail_next >= 10 && score <= g_sell_score_trail_next)
+   while(trail_next >= 10 && score <= trail_next)
    {
-      g_sell_score_trail_stop = g_sell_score_trail_next;
-      g_sell_score_trail_next = (g_sell_score_trail_stop <= 10) ? 0 : (g_sell_score_trail_stop - 10);
-      PrintFormat("Sell score trail advanced. stop=%d next=%d score=%.2f",
-                  g_sell_score_trail_stop, g_sell_score_trail_next, score);
+      trail_stop = trail_next;
+      trail_next = (trail_stop <= 10) ? 0 : (trail_stop - 10);
+      PrintFormat("%s trail advanced. stop=%d next=%d score=%.2f",
+                  label, trail_stop, trail_next, score);
    }
 
-   if(g_sell_score_trail_stop <= 10)
+   if(trail_stop <= 10)
    {
       reason = StringFormat("trail finished at 10 (score %.2f)", score);
       return true;
    }
 
-   if(score > g_sell_score_trail_stop)
+   if(score > trail_stop)
    {
-      reason = StringFormat("trail stop hit (score %.2f > %d)", score, g_sell_score_trail_stop);
+      reason = StringFormat("trail stop hit (score %.2f > %d)", score, trail_stop);
       return true;
    }
 
@@ -1263,7 +1304,7 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 //+------------------------------------------------------------------+
 //| Trading flow per side                                            |
 //+------------------------------------------------------------------+
-void ProcessBuy(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3, const bool has_rsi_direction, const double rsi_direction_delta)
+void ProcessBuy(const bool hedging, const double bid, const double ask, const double score, const double score2, const double sumit_rsi, const double signal_ma3, const bool has_rsi_direction, const double rsi_direction_delta)
 {
    if(!BuyEntry)
       return;
@@ -1280,12 +1321,14 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
 
    int openCount = OpenTrancheCountBuy();
    int scoreTrigger = NormalizeScoreLevel(BUYEntryScore);
+   int scoreTrigger2 = NormalizeScoreLevel(BUYEntryScore2);
    int entrySumitLevel = ResolveLinkedThresholdLevel(BUYEntrySumitRSI, scoreTrigger);
    int entrySignalLevel = ResolveLinkedThresholdLevel(BUYEntrySignalMA3, scoreTrigger);
    bool scoreOk = (score <= scoreTrigger);
+   bool score2Ok = (score2 <= scoreTrigger2);
    bool sumitOk = (entrySumitLevel == 0 || sumit_rsi <= entrySumitLevel);
    bool signalOk = (entrySignalLevel == 0 || signal_ma3 <= entrySignalLevel);
-   bool entryOk = (scoreOk && sumitOk && signalOk);
+   bool entryOk = (scoreOk && score2Ok && sumitOk && signalOk);
 
    if(openCount == 0)
    {
@@ -1324,7 +1367,7 @@ void ProcessBuy(const bool hedging, const double bid, const double ask, const do
    }
 }
 
-void ProcessSell(const bool hedging, const double bid, const double ask, const double score, const double sumit_rsi, const double signal_ma3, const bool has_rsi_direction, const double rsi_direction_delta)
+void ProcessSell(const bool hedging, const double bid, const double ask, const double score, const double score2, const double sumit_rsi, const double signal_ma3, const bool has_rsi_direction, const double rsi_direction_delta)
 {
    if(!SellEntry)
       return;
@@ -1341,12 +1384,14 @@ void ProcessSell(const bool hedging, const double bid, const double ask, const d
 
    int openCount = OpenTrancheCountSell();
    int scoreTrigger = NormalizeScoreLevel(SELLEntryScore);
+   int scoreTrigger2 = NormalizeScoreLevel(SELLEntryScore2);
    int entrySumitLevel = ResolveLinkedThresholdLevel(SELLEntrySumitRSI, scoreTrigger);
    int entrySignalLevel = ResolveLinkedThresholdLevel(SELLEntrySignalMA3, scoreTrigger);
    bool scoreOk = (score >= scoreTrigger);
+   bool score2Ok = (score2 >= scoreTrigger2);
    bool sumitOk = (entrySumitLevel == 0 || sumit_rsi >= entrySumitLevel);
    bool signalOk = (entrySignalLevel == 0 || signal_ma3 >= entrySignalLevel);
-   bool entryOk = (scoreOk && sumitOk && signalOk);
+   bool entryOk = (scoreOk && score2Ok && sumitOk && signalOk);
 
    if(openCount == 0)
    {
@@ -1416,10 +1461,12 @@ int CloseAllManagedPositions(const ulong magic, const int position_type, const s
    return closed_count;
 }
 
-void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const double sumit_rsi, const double signal_ma3)
+void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const double score2, const double sumit_rsi, const double signal_ma3)
 {
    int buy_target = NormalizeScoreLevel(BUYExitScore);
+   int buy_target2 = NormalizeScoreLevel(BUYExitScore2);
    int sell_target = NormalizeScoreLevel(SELLExitScore);
+   int sell_target2 = NormalizeScoreLevel(SELLExitScore2);
    int buyExitSumitLevel = ResolveLinkedThresholdLevel(BUYExitSumitRSI, buy_target);
    int buyExitSignalLevel = ResolveLinkedThresholdLevel(BUYExitSignalMA3, buy_target);
    int sellExitSumitLevel = ResolveLinkedThresholdLevel(SELLExitSumitRSI, sell_target);
@@ -1428,28 +1475,41 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
    int open_buy_count = OpenTrancheCountBuy();
    int open_sell_count = OpenTrancheCountSell();
    if(open_buy_count <= 0)
+   {
       ResetBuyScoreTrailState();
+      ResetBuyScore2TrailState();
+   }
    if(open_sell_count <= 0)
+   {
       ResetSellScoreTrailState();
+      ResetSellScore2TrailState();
+   }
 
    string buy_score_reason = "";
+   string buy_score2_reason = "";
    string sell_score_reason = "";
-   bool close_buys_by_score = (BUYExitScore > 0 && open_buy_count > 0 && EvaluateBuyScoreExit(score, buy_target, buy_score_reason));
+   string sell_score2_reason = "";
+   bool close_buys_by_score = (BUYExitScore > 0 && open_buy_count > 0 && EvaluateBuyScoreExit(score, buy_target, g_buy_score_trail_stop, g_buy_score_trail_next, "Buy score1", buy_score_reason));
+   bool close_buys_by_score2 = (BUYExitScore2 > 0 && open_buy_count > 0 && EvaluateBuyScoreExit(score2, buy_target2, g_buy_score2_trail_stop, g_buy_score2_trail_next, "Buy score2", buy_score2_reason));
    bool close_buys_by_sumit = (buyExitSumitLevel > 0 && sumit_rsi >= buyExitSumitLevel);
    bool close_buys_by_signal = (buyExitSignalLevel > 0 && signal_ma3 >= buyExitSignalLevel);
-   bool close_sells_by_score = (SELLExitScore > 0 && open_sell_count > 0 && EvaluateSellScoreExit(score, sell_target, sell_score_reason));
+   bool close_sells_by_score = (SELLExitScore > 0 && open_sell_count > 0 && EvaluateSellScoreExit(score, sell_target, g_sell_score_trail_stop, g_sell_score_trail_next, "Sell score1", sell_score_reason));
+   bool close_sells_by_score2 = (SELLExitScore2 > 0 && open_sell_count > 0 && EvaluateSellScoreExit(score2, sell_target2, g_sell_score2_trail_stop, g_sell_score2_trail_next, "Sell score2", sell_score2_reason));
    bool close_sells_by_sumit = (sellExitSumitLevel > 0 && sumit_rsi <= sellExitSumitLevel);
    bool close_sells_by_signal = (sellExitSignalLevel > 0 && signal_ma3 <= sellExitSignalLevel);
 
-   if(close_buys_by_score || close_buys_by_sumit || close_buys_by_signal)
+   if(close_buys_by_score || close_buys_by_score2 || close_buys_by_sumit || close_buys_by_signal)
    {
       string reason = StringFormat(
-         "Buy exit: scoreHit=%s(%s) sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
+         "Buy exit: score1Hit=%s(%s) score2Hit=%s(%s) sumitHit=%s signalHit=%s (score1=%.2f score2=%.2f sumit=%.2f signal=%.2f)",
          close_buys_by_score ? "Y" : "N",
          buy_score_reason,
+         close_buys_by_score2 ? "Y" : "N",
+         buy_score2_reason,
          close_buys_by_sumit ? "Y" : "N",
          close_buys_by_signal ? "Y" : "N",
          score,
+         score2,
          sumit_rsi,
          signal_ma3
       );
@@ -1458,18 +1518,22 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
       {
          SyncTranchesBuy(hedging);
          ResetBuyScoreTrailState();
+         ResetBuyScore2TrailState();
       }
    }
 
-   if(close_sells_by_score || close_sells_by_sumit || close_sells_by_signal)
+   if(close_sells_by_score || close_sells_by_score2 || close_sells_by_sumit || close_sells_by_signal)
    {
       string reason = StringFormat(
-         "Sell exit: scoreHit=%s(%s) sumitHit=%s signalHit=%s (score=%.2f sumit=%.2f signal=%.2f)",
+         "Sell exit: score1Hit=%s(%s) score2Hit=%s(%s) sumitHit=%s signalHit=%s (score1=%.2f score2=%.2f sumit=%.2f signal=%.2f)",
          close_sells_by_score ? "Y" : "N",
          sell_score_reason,
+         close_sells_by_score2 ? "Y" : "N",
+         sell_score2_reason,
          close_sells_by_sumit ? "Y" : "N",
          close_sells_by_signal ? "Y" : "N",
          score,
+         score2,
          sumit_rsi,
          signal_ma3
       );
@@ -1478,6 +1542,7 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
       {
          SyncTranchesSell(hedging);
          ResetSellScoreTrailState();
+         ResetSellScore2TrailState();
       }
    }
 }
@@ -1564,6 +1629,28 @@ int OnInit()
       return(INIT_FAILED);
    }
 
+   sumitScore2Handle = iCustom(
+      _Symbol,
+      SumitScore_2Period,
+      "Sumit_RSI_Score_Indicator",
+      Rsi1hPeriod,
+      Sumit_MaBuy,
+      Sumit_MaSell,
+      Rsi1hBuy,
+      Rsi1hSell,
+      SumitSma3Period,
+      SumitSma201Period,
+      SumitRsiPeriod
+   );
+
+   if(sumitScore2Handle == INVALID_HANDLE)
+   {
+      PrintFormat("Failed to create Sumit score2 indicator handle (%s). err=%d",
+                  EnumToString(SumitScore_2Period),
+                  GetLastError());
+      return(INIT_FAILED);
+   }
+
    if(UseSuperTrend)
    {
       supertrendH1Handle = iCustom(
@@ -1597,12 +1684,13 @@ int OnInit()
                TrailingTargetPercent,
                EntryScoreSLTrail ? "true" : "false",
                RecoverExistingMagicPositions ? "true" : "false");
-   PrintFormat("BUY thresholds (-1=>use score): entry(score<=%d,sumit<=%d,signal<=%d) exit(score>=%d,sumit>=%d,signal>=%d)",
-               BUYEntryScore, BUYEntrySumitRSI, BUYEntrySignalMA3,
-               BUYExitScore, BUYExitSumitRSI, BUYExitSignalMA3);
-   PrintFormat("SELL thresholds (-1=>use score): entry(score>=%d,sumit>=%d,signal>=%d) exit(score<=%d,sumit<=%d,signal<=%d)",
-               SELLEntryScore, SELLEntrySumitRSI, SELLEntrySignalMA3,
-               SELLExitScore, SELLExitSumitRSI, SELLExitSignalMA3);
+   PrintFormat("Score2 timeframe: %s", EnumToString(SumitScore_2Period));
+   PrintFormat("BUY thresholds (-1=>use score): entry(score1<=%d,score2<=%d,sumit<=%d,signal<=%d) exit(score1>=%d,score2>=%d,sumit>=%d,signal>=%d)",
+               BUYEntryScore, BUYEntryScore2, BUYEntrySumitRSI, BUYEntrySignalMA3,
+               BUYExitScore, BUYExitScore2, BUYExitSumitRSI, BUYExitSignalMA3);
+   PrintFormat("SELL thresholds (-1=>use score): entry(score1>=%d,score2>=%d,sumit>=%d,signal>=%d) exit(score1<=%d,score2<=%d,sumit<=%d,signal<=%d)",
+               SELLEntryScore, SELLEntryScore2, SELLEntrySumitRSI, SELLEntrySignalMA3,
+               SELLExitScore, SELLExitScore2, SELLExitSumitRSI, SELLExitSignalMA3);
    PrintFormat("RSI direction: BuyMode=%d SellMode=%d Lookback=%d SidewaysDelta=%.2f",
                BuyRSIDirectionMode, SellRSIDirectionMode, GetRsiDirectionLookback(), GetRsiSidewaysDelta());
    PrintFormat("Side config: BuyEntry=%s SellEntry=%s BuyMagic=%I64u SellMagic=%I64u",
@@ -1630,6 +1718,8 @@ void OnDeinit(const int reason)
 {
    if(sumitScoreHandle != INVALID_HANDLE)
       IndicatorRelease(sumitScoreHandle);
+   if(sumitScore2Handle != INVALID_HANDLE)
+      IndicatorRelease(sumitScore2Handle);
    if(supertrendH1Handle != INVALID_HANDLE)
       IndicatorRelease(supertrendH1Handle);
 }
@@ -1657,10 +1747,12 @@ void OnTick()
 
    int score_shift = UseNewBar ? 1 : 0;
    double score = EMPTY_VALUE;
+   double score2 = EMPTY_VALUE;
    double sumit_rsi = EMPTY_VALUE;
    double signal_ma3 = EMPTY_VALUE;
    double rsi_direction_delta = 0.0;
    bool has_score = GetScoreValue(score_shift, score);
+   bool has_score2 = GetScore2Value(score_shift, score2);
    bool has_sumit = GetSumitIndicatorValue(0, score_shift, sumit_rsi);
    bool has_signal = GetSumitIndicatorValue(1, score_shift, signal_ma3);
    bool need_rsi_direction = (BuyRSIDirectionMode > 0 || SellRSIDirectionMode > 0);
@@ -1674,8 +1766,8 @@ void OnTick()
       CheckTargetsSell(hedging, ask);
    }
 
-   if(has_score && has_sumit && has_signal)
-      ApplyScoreAndIndicatorExits(hedging, score, sumit_rsi, signal_ma3);
+   if(has_score && has_score2 && has_sumit && has_signal)
+      ApplyScoreAndIndicatorExits(hedging, score, score2, sumit_rsi, signal_ma3);
 
    if(UseNewBar)
    {
@@ -1685,9 +1777,9 @@ void OnTick()
       last_bar_time = bar_time;
    }
 
-   if(!has_score || !has_sumit || !has_signal)
+   if(!has_score || !has_score2 || !has_sumit || !has_signal)
       return;
 
-   ProcessBuy(hedging, bid, ask, score, sumit_rsi, signal_ma3, has_rsi_direction, rsi_direction_delta);
-   ProcessSell(hedging, bid, ask, score, sumit_rsi, signal_ma3, has_rsi_direction, rsi_direction_delta);
+   ProcessBuy(hedging, bid, ask, score, score2, sumit_rsi, signal_ma3, has_rsi_direction, rsi_direction_delta);
+   ProcessSell(hedging, bid, ask, score, score2, sumit_rsi, signal_ma3, has_rsi_direction, rsi_direction_delta);
 }

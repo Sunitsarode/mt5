@@ -30,7 +30,7 @@ input int ExitScoreSell = 0;  // 0=disabled, close SELL when score <= target
 input int OnCross_SumitRSI_SignalMA3 = 0; // 0=disabled, 1=enable SumitRSI/SignalMA3 cross logic
 
 // SuperTrend filter (runtime-selectable timeframe)
-input bool UseSuperTrend = false;
+input bool UseSuperTrend = true;
 input int SupertrendAtrPeriod = 51;
 input double SupertrendMultiplier = 0.5;
 input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_M15; // e.g.  PERIOD_H1
