@@ -10,6 +10,7 @@
 //LAST CANDLES = 21 MEANS (21MIN FOR 1M TIMEFRAME)
 //IF GAIN IS BELOW THAN 0.5% THEN CLOSE THE TRADE...
 //BUT IT WILL AFFECT THE CURRENT TARGET.. IF CURRENT TARGET IS SET THEN FORCE EXIT THE ENTRY 
+//usoil, btc, eurusd = 0.1 lot size else 0.01 lot size
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
 #property version   "1.00"
@@ -28,7 +29,7 @@
  int SumitSma201Period = 201;
  int SumitRsiPeriod = 7;
 input bool BuyEntry = true;
-input int EntryScoreBuy = 20; // Set 0 to disable score filter for buy entries
+input int EntryScoreBuy = 10; // Set 0 to disable score filter for buy entries
 input string chk_last_candle_breaks_buy = "0"; 
 input string chk_last_candle_type_buy = "0";  
 input double BuyLotSize = 0.01;
@@ -36,7 +37,7 @@ input double BuyLotStep = 0.01;
 input int BuyMaxEntries = 0;  
 
 input bool SellEntry = true;
-input int EntryScoreSell = 80; // Set 0 to disable score filter for sell entries
+input int EntryScoreSell = 90; // Set 0 to disable score filter for sell entries
 input string chk_last_candle_breaks_sell = "0"; 
 input string chk_last_candle_type_sell = "0";   
 input double SellLotSize = 0.01;
@@ -49,33 +50,35 @@ enum ExitByTrendMode
    EXIT_BY_ST2 = 1,
    EXIT_BY_ANY = 2
 };
-input ExitByTrendMode exitbytrend = EXIT_BY_ST2; // st1 | st2 | any
+input ExitByTrendMode exitbytrend = EXIT_BY_ST1; // st1 | st2 | any
 
 
 input int SupertrendAtrPeriod = 51;
 input double SupertrendMultiplier = 1.5;
-input ENUM_TIMEFRAMES ST2Timeframe = PERIOD_M5; // PERIOD_CURRENT (0) disables ST2
+input ENUM_TIMEFRAMES ST2Timeframe = PERIOD_CURRENT; // PERIOD_CURRENT (0) disables ST2
 ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
 
 // Trading logic (common)
-input double TargetPercent = 0.175;      
+input double TargetPercent = 0.31;      
 input double UpDownStep = 0.025;         
-input bool SetTargetWithEntry = false;  // brokerside SetTargetWithEntry
-input double TrailingTargetPercent = 0.02; //TrailingTargetPercent (0 disables)
-input bool FastExecutionOnTick = true; // true=current bar signal, false=closed bar signal
-input bool EntryOnFlipOnly = false; // true=entry only when ST1 flips direction
-input bool RequireST2ForEntry = false; // false-signal filter
-input double MaxSpreadPoints = 0.0; // 0 disables
+input bool SetTargetWithEntry = true;  // brokerside SetTargetWithEntry
+input double TrailingTargetPercent = 0; //TrailingTargetPercent (0 disables)
+input bool FastExecutionOnTick = true; // FastExecutionOnTick true/false=(current bar/closed bar)
+input bool ExitTrendOnCurrentBar = true; // true=trend exits use current bar even if entry uses closed bar
+input bool EnableIntrabarExitInTester = false; // false=fast tester (new-bar exits), true=intrabar exits in tester (slower)
+input bool EntryOnFlipOnly = false;  
+input bool RequireST2ForEntry = false; 
+input double MaxSpreadPoints = 0.0; 
 input int AtrFilterPeriod = 14;
-input double MinAtrPercent = 0.0; // 0 disables
+input double MinAtrPercent = 0.0;  
 
 bool RecoverExistingMagicPositions = true; 
 
-input ulong BuyMagicNumber = 1051;
-input ulong SellMagicNumber = 2051;
+input ulong BuyMagicNumber = 131;
+input ulong SellMagicNumber = 121;
 int Deviation = 30;
-input bool UseNewBar = true;
+input bool UseNewBar = false;
 
 CTrade trade;
 
@@ -191,6 +194,20 @@ double CalculateTargetPriceSell(const double entry_price)
    return NormalizePrice(entry_price - CalculateTargetDistance(entry_price));
 }
 
+double ResolveTargetPriceBuy(const double entry_price)
+{
+   if(TargetPercent <= 0.0 || entry_price <= 0.0)
+      return 0.0;
+   return CalculateTargetPriceBuy(entry_price);
+}
+
+double ResolveTargetPriceSell(const double entry_price)
+{
+   if(TargetPercent <= 0.0 || entry_price <= 0.0)
+      return 0.0;
+   return CalculateTargetPriceSell(entry_price);
+}
+
 double CalculateTrailingDistance(const double reference_price)
 {
    if(TrailingTargetPercent <= 0.0 || reference_price <= 0.0)
@@ -247,6 +264,16 @@ bool IsAnyScoreFilterEnabled()
 bool IsST2Enabled()
 {
    return (ST2Timeframe != PERIOD_CURRENT);
+}
+
+bool IsTargetEnabled()
+{
+   return (TargetPercent > 0.0);
+}
+
+bool IsTrailingEnabled()
+{
+   return (!SetTargetWithEntry && TrailingTargetPercent > 0.0);
 }
 
 int GetSignalShift()
@@ -466,7 +493,7 @@ void UpdateLastEntryFromOpenBuy()
 
 void EnsureServerTargetsForOpenPositionsBuy(const bool hedging)
 {
-   if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
+   if(!SetTargetWithEntry || !RecoverExistingMagicPositions || !IsTargetEnabled())
       return;
 
    int ptotal = PositionsTotal();
@@ -481,7 +508,9 @@ void EnsureServerTargetsForOpenPositionsBuy(const bool hedging)
          continue;
 
       double entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
-      double target_price = CalculateTargetPriceBuy(entry_price);
+      double target_price = ResolveTargetPriceBuy(entry_price);
+      if(target_price <= 0.0)
+         continue;
       bool modified = hedging
                       ? trade.PositionModify(ticket, 0.0, target_price)
                       : trade.PositionModify(_Symbol, 0.0, target_price);
@@ -603,7 +632,7 @@ void RebuildTranchesFromPositionsBuy(const bool hedging)
       t.entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
       t.volume = PositionGetDouble(POSITION_VOLUME);
       double broker_tp = PositionGetDouble(POSITION_TP);
-      t.target_price = (broker_tp > 0.0) ? broker_tp : CalculateTargetPriceBuy(t.entry_price);
+      t.target_price = (broker_tp > 0.0) ? broker_tp : ResolveTargetPriceBuy(t.entry_price);
       t.trailing_active = false;
       t.trailing_peak = 0.0;
       t.closed = false;
@@ -625,7 +654,7 @@ bool AddTrancheBuy(const double entry_price, const double volume, const ulong ti
    t.time_open = TimeCurrent();
    t.entry_price = entry_price;
    t.volume = volume;
-   t.target_price = (target_price > 0.0) ? target_price : CalculateTargetPriceBuy(entry_price);
+   t.target_price = (target_price > 0.0) ? target_price : ResolveTargetPriceBuy(entry_price);
    t.trailing_active = false;
    t.trailing_peak = 0.0;
    t.closed = false;
@@ -646,7 +675,10 @@ void CheckTargetsBuy(const bool hedging, const double current_price)
    if(total == 0)
       return;
 
-   bool use_trailing = (!SetTargetWithEntry && TrailingTargetPercent > 0.0);
+   bool use_trailing = IsTrailingEnabled();
+   bool target_enabled = IsTargetEnabled();
+   if(!target_enabled && !use_trailing)
+      return;
 
    for(int i = 0; i < total; i++)
    {
@@ -656,14 +688,20 @@ void CheckTargetsBuy(const bool hedging, const double current_price)
       bool should_close = false;
       if(!use_trailing)
       {
-         if(current_price >= buy_tranches[i].target_price)
+         if(target_enabled && buy_tranches[i].target_price > 0.0 && current_price >= buy_tranches[i].target_price)
             should_close = true;
       }
       else
       {
          if(!buy_tranches[i].trailing_active)
          {
-            if(current_price >= buy_tranches[i].target_price)
+            bool can_activate = false;
+            if(target_enabled && buy_tranches[i].target_price > 0.0)
+               can_activate = (current_price >= buy_tranches[i].target_price);
+            else
+               can_activate = (current_price > buy_tranches[i].entry_price);
+
+            if(can_activate)
             {
                buy_tranches[i].trailing_active = true;
                buy_tranches[i].trailing_peak = current_price;
@@ -729,8 +767,8 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
 
    string comment = StringFormat("SB|lot=%.2f", vol);
    double request_target = 0.0;
-   if(SetTargetWithEntry)
-      request_target = CalculateTargetPriceBuy(price);
+   if(SetTargetWithEntry && IsTargetEnabled())
+      request_target = ResolveTargetPriceBuy(price);
 
    if(!trade.Buy(vol, _Symbol, 0, 0, request_target, comment))
    {
@@ -751,9 +789,9 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
          ticket = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
    }
 
-   double tranche_target = CalculateTargetPriceBuy(entry_price);
+   double tranche_target = ResolveTargetPriceBuy(entry_price);
 
-   if(SetTargetWithEntry)
+   if(SetTargetWithEntry && IsTargetEnabled() && tranche_target > 0.0)
    {
       bool can_verify_position = false;
       bool modified = true;
@@ -859,7 +897,7 @@ void UpdateLastEntryFromOpenSell()
 
 void EnsureServerTargetsForOpenPositionsSell(const bool hedging)
 {
-   if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
+   if(!SetTargetWithEntry || !RecoverExistingMagicPositions || !IsTargetEnabled())
       return;
 
    int ptotal = PositionsTotal();
@@ -874,7 +912,9 @@ void EnsureServerTargetsForOpenPositionsSell(const bool hedging)
          continue;
 
       double entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
-      double target_price = CalculateTargetPriceSell(entry_price);
+      double target_price = ResolveTargetPriceSell(entry_price);
+      if(target_price <= 0.0)
+         continue;
       bool modified = hedging
                       ? trade.PositionModify(ticket, 0.0, target_price)
                       : trade.PositionModify(_Symbol, 0.0, target_price);
@@ -996,7 +1036,7 @@ void RebuildTranchesFromPositionsSell(const bool hedging)
       t.entry_price = PositionGetDouble(POSITION_PRICE_OPEN);
       t.volume = PositionGetDouble(POSITION_VOLUME);
       double broker_tp = PositionGetDouble(POSITION_TP);
-      t.target_price = (broker_tp > 0.0) ? broker_tp : CalculateTargetPriceSell(t.entry_price);
+      t.target_price = (broker_tp > 0.0) ? broker_tp : ResolveTargetPriceSell(t.entry_price);
       t.trailing_active = false;
       t.trailing_peak = 0.0;
       t.closed = false;
@@ -1018,7 +1058,7 @@ bool AddTrancheSell(const double entry_price, const double volume, const ulong t
    t.time_open = TimeCurrent();
    t.entry_price = entry_price;
    t.volume = volume;
-   t.target_price = (target_price > 0.0) ? target_price : CalculateTargetPriceSell(entry_price);
+   t.target_price = (target_price > 0.0) ? target_price : ResolveTargetPriceSell(entry_price);
    t.trailing_active = false;
    t.trailing_peak = 0.0;
    t.closed = false;
@@ -1039,7 +1079,10 @@ void CheckTargetsSell(const bool hedging, const double current_price)
    if(total == 0)
       return;
 
-   bool use_trailing = (!SetTargetWithEntry && TrailingTargetPercent > 0.0);
+   bool use_trailing = IsTrailingEnabled();
+   bool target_enabled = IsTargetEnabled();
+   if(!target_enabled && !use_trailing)
+      return;
 
    for(int i = 0; i < total; i++)
    {
@@ -1049,14 +1092,20 @@ void CheckTargetsSell(const bool hedging, const double current_price)
       bool should_close = false;
       if(!use_trailing)
       {
-         if(current_price <= sell_tranches[i].target_price)
+         if(target_enabled && sell_tranches[i].target_price > 0.0 && current_price <= sell_tranches[i].target_price)
             should_close = true;
       }
       else
       {
          if(!sell_tranches[i].trailing_active)
          {
-            if(current_price <= sell_tranches[i].target_price)
+            bool can_activate = false;
+            if(target_enabled && sell_tranches[i].target_price > 0.0)
+               can_activate = (current_price <= sell_tranches[i].target_price);
+            else
+               can_activate = (current_price < sell_tranches[i].entry_price);
+
+            if(can_activate)
             {
                sell_tranches[i].trailing_active = true;
                sell_tranches[i].trailing_peak = current_price;
@@ -1122,8 +1171,8 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 
    string comment = StringFormat("SS|lot=%.2f", vol);
    double request_target = 0.0;
-   if(SetTargetWithEntry)
-      request_target = CalculateTargetPriceSell(price);
+   if(SetTargetWithEntry && IsTargetEnabled())
+      request_target = ResolveTargetPriceSell(price);
 
    if(!trade.Sell(vol, _Symbol, 0, 0, request_target, comment))
    {
@@ -1144,9 +1193,9 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
          ticket = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
    }
 
-   double tranche_target = CalculateTargetPriceSell(entry_price);
+   double tranche_target = ResolveTargetPriceSell(entry_price);
 
-   if(SetTargetWithEntry)
+   if(SetTargetWithEntry && IsTargetEnabled() && tranche_target > 0.0)
    {
       bool can_verify_position = false;
       bool modified = true;
@@ -1319,7 +1368,7 @@ void ProcessSell(
    }
 }
 
-int CloseAllManagedPositions(const ulong magic, const int position_type, const string reason)
+int CloseAllManagedPositions(const ulong magic, const int position_type, const string reason, const bool hedging)
 {
    int closed_count = 0;
    int ptotal = PositionsTotal();
@@ -1335,7 +1384,18 @@ int CloseAllManagedPositions(const ulong magic, const int position_type, const s
       trade.SetExpertMagicNumber(magic);
       trade.SetDeviationInPoints(Deviation);
 
-      if(trade.PositionClose(ticket))
+      bool closed = trade.PositionClose(ticket);
+      if(!closed && !hedging)
+      {
+         if(PositionSelect(_Symbol) &&
+            (ulong)PositionGetInteger(POSITION_MAGIC) == magic &&
+            (int)PositionGetInteger(POSITION_TYPE) == position_type)
+         {
+            closed = trade.PositionClose(_Symbol);
+         }
+      }
+
+      if(closed)
          closed_count++;
       else
       {
@@ -1352,17 +1412,17 @@ int CloseAllManagedPositions(const ulong magic, const int position_type, const s
 
 void ApplyExitByTrend(const bool hedging, const int st1_direction, const int st2_direction)
 {
-   if(OpenTrancheCountBuy() > 0 && ShouldExitBuysByTrend(st1_direction, st2_direction))
+   if(ShouldExitBuysByTrend(st1_direction, st2_direction))
    {
-      if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "Trend exit: selected SuperTrend is bearish for buys") > 0)
+      if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "Trend exit: selected SuperTrend is bearish for buys", hedging) > 0)
       {
          SyncTranchesBuy(hedging);
       }
    }
 
-   if(OpenTrancheCountSell() > 0 && ShouldExitSellsByTrend(st1_direction, st2_direction))
+   if(ShouldExitSellsByTrend(st1_direction, st2_direction))
    {
-      if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "Trend exit: selected SuperTrend is bullish for sells") > 0)
+      if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "Trend exit: selected SuperTrend is bullish for sells", hedging) > 0)
       {
          SyncTranchesSell(hedging);
       }
@@ -1494,12 +1554,15 @@ int OnInit()
                SellEntry ? "true" : "false",
                BuyMagicNumber,
                SellMagicNumber);
-   PrintFormat("Signal mode: FastExecutionOnTick=%s EntryOnFlipOnly=%s RequireST2ForEntry=%s MaxSpreadPoints=%.1f MinAtrPercent=%.3f",
-               FastExecutionOnTick ? "true" : "false",
-               EntryOnFlipOnly ? "true" : "false",
-               RequireST2ForEntry ? "true" : "false",
-               MaxSpreadPoints,
-               MinAtrPercent);
+   PrintFormat("Signal mode: FastExecutionOnTick=%s ExitTrendOnCurrentBar=%s EnableIntrabarExitInTester=%s UseNewBar=%s EntryOnFlipOnly=%s RequireST2ForEntry=%s MaxSpreadPoints=%.1f MinAtrPercent=%.3f",
+                 FastExecutionOnTick ? "true" : "false",
+                 ExitTrendOnCurrentBar ? "true" : "false",
+                 EnableIntrabarExitInTester ? "true" : "false",
+                 UseNewBar ? "true" : "false",
+                 EntryOnFlipOnly ? "true" : "false",
+                 RequireST2ForEntry ? "true" : "false",
+                MaxSpreadPoints,
+                MinAtrPercent);
 
    if(RecoverExistingMagicPositions)
    {
@@ -1535,12 +1598,22 @@ void OnTick()
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       return;
 
-   if(UseNewBar && !FastExecutionOnTick)
+   bool run_entry_logic = true;
+   bool is_tester = (MQLInfoInteger(MQL_TESTER) != 0 || MQLInfoInteger(MQL_OPTIMIZATION) != 0);
+   bool allow_intrabar_exit = (!UseNewBar || !is_tester || EnableIntrabarExitInTester);
+   if(UseNewBar)
    {
       datetime bar_time = iTime(_Symbol, PERIOD_CURRENT, 0);
-      if(bar_time == 0 || bar_time == last_bar_time)
+      if(bar_time == 0)
          return;
-      last_bar_time = bar_time;
+      if(bar_time == last_bar_time)
+      {
+         if(!allow_intrabar_exit)
+            return;
+         run_entry_logic = false;
+      }
+      else
+         last_bar_time = bar_time;
    }
 
    bool hedging = IsHedging();
@@ -1555,11 +1628,24 @@ void OnTick()
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    int signal_shift = GetSignalShift();
+   int exit_shift = ExitTrendOnCurrentBar ? 0 : signal_shift;
+
+   int st1_direction_exit = GetSuperTrendDirection(exit_shift);
+   int st2_direction_exit = IsST2Enabled() ? GetSuperTrendDirectionST2(exit_shift) : 0;
+
+   ApplyExitByTrend(hedging, st1_direction_exit, st2_direction_exit);
+
+   if(!SetTargetWithEntry)
+   {
+      CheckTargetsBuy(hedging, bid);
+      CheckTargetsSell(hedging, ask);
+   }
+
+   if(!run_entry_logic)
+      return;
 
    int st1_direction = GetSuperTrendDirection(signal_shift);
    int st2_direction = IsST2Enabled() ? GetSuperTrendDirectionST2(signal_shift) : 0;
-
-   ApplyExitByTrend(hedging, st1_direction, st2_direction);
 
    double score = 50.0;
    bool has_score = true;
@@ -1568,23 +1654,22 @@ void OnTick()
       has_score = GetScoreValue(signal_shift, score);
    }
 
+   if(!has_score)
+      return;
+
    bool spread_ok = IsSpreadFilterPassed(bid, ask);
    double mid_price = (bid + ask) * 0.5;
    bool atr_ok = IsAtrFilterPassed(signal_shift, mid_price);
    bool common_entry_filters_ok = (spread_ok && atr_ok);
 
-   int prev_direction = GetSuperTrendDirection(signal_shift + 1);
-   bool flip_to_buy = (st1_direction > 0 && prev_direction < 0);
-   bool flip_to_sell = (st1_direction < 0 && prev_direction > 0);
-
-   if(!SetTargetWithEntry)
+   bool flip_to_buy = false;
+   bool flip_to_sell = false;
+   if(EntryOnFlipOnly)
    {
-      CheckTargetsBuy(hedging, bid);
-      CheckTargetsSell(hedging, ask);
+      int prev_direction = GetSuperTrendDirection(signal_shift + 1);
+      flip_to_buy = (st1_direction > 0 && prev_direction < 0);
+      flip_to_sell = (st1_direction < 0 && prev_direction > 0);
    }
-
-   if(!has_score)
-      return;
 
    ProcessBuy(hedging, bid, ask, score, st1_direction, st2_direction, flip_to_buy, common_entry_filters_ok);
    ProcessSell(hedging, bid, ask, score, st1_direction, st2_direction, flip_to_sell, common_entry_filters_ok);
