@@ -2,7 +2,10 @@
 //|
 //   Combined Buy + Sell strategy with score + RSI-direction entry/exit                            |
 //| Uses external indicators: Sumit_RSI_Score_Indicator + optional SuperTrend filter              |
-//
+// -------15 min ---                                  -------------
+//     current   -------                        ------
+//                  -----------        ----------------  
+//                     10-10  ----BUY---   if (Supertrend = bullish) 
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
 #property version   "1.00"
@@ -60,8 +63,8 @@ input double RSISidewaysDelta = 1.0;
 
 
 input bool UseSuperTrend = true;
-input int SupertrendAtrPeriod = 51;
-input double SupertrendMultiplier = 1.5;
+input int SupertrendAtrPeriod = 7;
+input double SupertrendMultiplier = 2.1;
 input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_M15; 
 ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
@@ -71,7 +74,7 @@ input bool SupetrendBasedSL = false;
 input double TargetPercent = 0.075;      
 input double UpDownStep = 0.025;         
 input bool SetTargetWithEntry = true;  // brokerside SetTargetWithEntry
-input double TrailingTargetPercent = 0.02; //TrailingTargetPercent (0 disables)
+input double TrailingTargetPercent = 0.0; //TrailingTargetPercent (0 disables)
 input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
 
 bool RecoverExistingMagicPositions = true; 
@@ -80,7 +83,7 @@ bool RecoverExistingMagicPositions = true;
 input ulong BuyMagicNumber = 1051;
 input ulong SellMagicNumber = 2051;
 int Deviation = 30;
-input bool UseNewBar = true;
+input bool UseNewBar = false;
 
 CTrade trade;
 

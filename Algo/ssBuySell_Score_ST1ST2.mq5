@@ -17,6 +17,7 @@
 #property strict
 
 #include <Trade/Trade.mqh>
+input ENUM_TIMEFRAMES sumit_score_timeframe = PERIOD_CURRENT;
 
 // Inputs for Sumit_RSI_Score_Indicator
  int Rsi1hPeriod = 51;
@@ -52,9 +53,10 @@ enum ExitByTrendMode
 };
 input ExitByTrendMode exitbytrend = EXIT_BY_ST1; // st1 | st2 | any
 
+input ENUM_TIMEFRAMES ST1Timeframe = PERIOD_CURRENT;
 
-input int SupertrendAtrPeriod = 51;
-input double SupertrendMultiplier = 1.5;
+input int SupertrendAtrPeriod = 7;
+input double SupertrendMultiplier = 2.1;
 input ENUM_TIMEFRAMES ST2Timeframe = PERIOD_CURRENT; // PERIOD_CURRENT (0) disables ST2
 ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
 bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
@@ -1467,6 +1469,7 @@ int OnInit()
       sumitScoreHandle = iCustom(
          _Symbol,
          PERIOD_CURRENT,
+         sumit_score_timeframe,
          "Sumit_RSI_Score_Indicator",
          Rsi1hPeriod,
          Sumit_MaBuy,
@@ -1488,6 +1491,7 @@ int OnInit()
    supertrendH1Handle = iCustom(
       _Symbol,
       PERIOD_CURRENT,
+      ST1Timeframe,
       "supertrend",
       SupertrendAtrPeriod,
       SupertrendMultiplier,
@@ -1497,6 +1501,7 @@ int OnInit()
    if(supertrendH1Handle == INVALID_HANDLE)
    {
       PrintFormat("Failed to create ST1 handle (%s). err=%d", EnumToString(PERIOD_CURRENT), GetLastError());
+      PrintFormat("Failed to create ST1 handle (%s). err=%d", EnumToString(ST1Timeframe), GetLastError());
       return(INIT_FAILED);
    }
 
@@ -1541,14 +1546,19 @@ int OnInit()
                RecoverExistingMagicPositions ? "true" : "false");
    if(IsAnyScoreFilterEnabled())
       PrintFormat("Entry scores: buy<=%d sell>=%d (0 disables per side)", EntryScoreBuy, EntryScoreSell);
+      PrintFormat("Entry scores: timeframe=%s buy<=%d sell>=%d (0 disables per side)", EnumToString(sumit_score_timeframe), EntryScoreBuy, EntryScoreSell);
    else
       Print("Entry scores: disabled (EntryScoreBuy=0 and EntryScoreSell=0)");
    if(IsST2Enabled())
       PrintFormat("Trend filters: ST1(current)=%s ST2(user)=%s exitbytrend=%s",
                   EnumToString(PERIOD_CURRENT), EnumToString(ST2Timeframe), EnumToString(exitbytrend));
+      PrintFormat("Trend filters: ST1=%s ST2=%s exitbytrend=%s",
+                  EnumToString(ST1Timeframe), EnumToString(ST2Timeframe), EnumToString(exitbytrend));
    else
       PrintFormat("Trend filters: ST1(current)=%s ST2=disabled (ST2Timeframe=PERIOD_CURRENT) exitbytrend=%s",
                   EnumToString(PERIOD_CURRENT), EnumToString(exitbytrend));
+      PrintFormat("Trend filters: ST1=%s ST2=disabled (ST2Timeframe=PERIOD_CURRENT) exitbytrend=%s",
+                  EnumToString(ST1Timeframe), EnumToString(exitbytrend));
    PrintFormat("Side config: BuyEntry=%s SellEntry=%s BuyMagic=%I64u SellMagic=%I64u",
                BuyEntry ? "true" : "false",
                SellEntry ? "true" : "false",
