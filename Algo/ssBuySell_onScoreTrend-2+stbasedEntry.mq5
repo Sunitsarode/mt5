@@ -13,77 +13,59 @@
 
 #include <Trade/Trade.mqh>
 
-// Inputs for Sumit_RSI_Score_Indicator
- int Rsi1hPeriod = 51;
- int Sumit_MaBuy = 30;
- int Sumit_MaSell = 70;
- int Rsi1hBuy = 40;
- int Rsi1hSell = 60;
- int SumitSma3Period = 3;
- int SumitSma201Period = 201;
- int SumitRsiPeriod = 7;
+input group "Indicator - Sumit RSI Score"
+input int Rsi1hPeriod = 51;
+input int Sumit_MaBuy = 30;
+input int Sumit_MaSell = 70;
+input int Rsi1hBuy = 40;
+input int Rsi1hSell = 60;
+input int SumitSma3Period = 3;
+input int SumitSma201Period = 201;
+input int SumitRsiPeriod = 7;
+input ENUM_TIMEFRAMES SumitScore_1Period = PERIOD_M15;
 input ENUM_TIMEFRAMES SumitScore_2Period = PERIOD_M15;
 
-//BuyRSIDirectionMode RSI direction modes: 0=disabled, 1=RisingOrSideways, 2=FallingOrSideways, 3=RisingOnly, 4=FallingOnly, 5=SidewaysOnly
-//SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
-//chk_last_candle_breaks_buy = "0"; // 0=disabled, H/L/O/C = prev candle High/Low/Open/close
-// chk_last_candle_type_buy = "0";  //  G=green candle, R=red candle  0=disabled
-//SupetrendBasedSL = false; // Close opposite-direction trades when SuperTrend flips
-
-
-
+input group "Entry - Supertrend Flip"
 input bool BuyEntry = true;
-input int BUYEntryScore = 30; 
-input int BUYExitScore = 50;   
-input int BUYEntryScore2 = 30;
-input int BUYExitScore2 = 0;
-input int BuyRSIDirectionMode = 0;  
-input string chk_last_candle_breaks_buy = "0"; 
-input string chk_last_candle_type_buy = "0";  
-input double BuyLotSize = 0.01;
-input double BuyLotStep = 0.01;
-input int BuyMaxEntries = 0;  
-
 input bool SellEntry = true;
-input int SELLEntryScore = 70;  
-input int SELLExitScore = 50;  
+input int BUYEntryScore = 30;
+input int BUYEntryScore2 = 30;
+input int SELLEntryScore = 70;
 input int SELLEntryScore2 = 70;
+input double LotSize = 0.01;
+input double LotStep = 0.01;
+input double UpDownStep = 0.025;
+input bool UseNewBar = false;
+
+input group "Exit - Score Based (0 = disabled)"
+input int BUYExitScore = 50;
+input int BUYExitScore2 = 0;
+input int SELLExitScore = 50;
 input int SELLExitScore2 = 0;
-input int SellRSIDirectionMode = 0;
-input string chk_last_candle_breaks_sell = "0"; 
-input string chk_last_candle_type_sell = "0";   
-input double SellLotSize = 0.01;
-input double SellLotStep = 0.01;
-input int SellMaxEntries = 0;
+input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
+input double TargetPercent = 0.075;
+input bool SetTargetWithEntry = true;   // broker-side TP set with entry
+input double TrailingTargetPercent = 0.0; // 0 disables trailing mode
 
-
-
-input int RSIDirectionLookbackBars = 3; 
-input double RSISidewaysDelta = 1.0; 
-
-
+input group "Indicator - Supertrend"
 input bool UseSuperTrend = true;
 input int SupertrendAtrPeriod = 7;
 input double SupertrendMultiplier = 2.1;
-input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_M15; 
-ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
-bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
-input bool SupetrendBasedSL = false; 
+input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_M15;
+input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
+input bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
 
-// Trading logic (common)
-input double TargetPercent = 0.075;      
-input double UpDownStep = 0.025;         
-input bool SetTargetWithEntry = true;  // brokerside SetTargetWithEntry
-input double TrailingTargetPercent = 0.0; //TrailingTargetPercent (0 disables)
-input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
-
-bool RecoverExistingMagicPositions = true; 
-
-
+input group "Risk / Execution"
 input ulong BuyMagicNumber = 1051;
 input ulong SellMagicNumber = 2051;
-int Deviation = 30;
-input bool UseNewBar = false;
+input int Deviation = 30;
+input bool RecoverExistingMagicPositions = true;
+
+input group "Legacy Entry Filters (currently unused)"
+input string chk_last_candle_breaks_buy = "0";
+input string chk_last_candle_type_buy = "0";
+input string chk_last_candle_breaks_sell = "0";
+input string chk_last_candle_type_sell = "0";
 
 CTrade trade;
 
@@ -108,11 +90,9 @@ int sell_next_seq = 0;
 
 double buy_last_entry_price_open = 0.0;
 double buy_last_entry_lot = 0.0;
-double buy_last_entry_price_ref = 0.0;
 
 double sell_last_entry_price_open = 0.0;
 double sell_last_entry_lot = 0.0;
-double sell_last_entry_price_ref = 0.0;
 
 datetime last_bar_time = 0;
 
@@ -140,12 +120,33 @@ int g_buy_score2_trail_next = 0;
 int g_sell_score2_trail_stop = 0;
 int g_sell_score2_trail_next = 0;
 
+int NormalizeScoreLevel(const int level);
+
 //+------------------------------------------------------------------+
 //| Utility                                                          |
 //+------------------------------------------------------------------+
 bool IsHedging()
 {
    return(AccountInfoInteger(ACCOUNT_MARGIN_MODE) == ACCOUNT_MARGIN_MODE_RETAIL_HEDGING);
+}
+
+bool IsTargetExitEnabled()
+{
+   return (TargetPercent > 0.0);
+}
+
+bool IsBuyEntryScoreConditionMet(const double score1, const double score2)
+{
+   int score1_trigger = NormalizeScoreLevel(BUYEntryScore);
+   int score2_trigger = NormalizeScoreLevel(BUYEntryScore2);
+   return (score1 <= score1_trigger && score2 <= score2_trigger);
+}
+
+bool IsSellEntryScoreConditionMet(const double score1, const double score2)
+{
+   int score1_trigger = NormalizeScoreLevel(SELLEntryScore);
+   int score2_trigger = NormalizeScoreLevel(SELLEntryScore2);
+   return (score1 >= score1_trigger && score2 >= score2_trigger);
 }
 
 double NormalizeVolume(double vol)
@@ -421,72 +422,6 @@ bool EvaluateSellScoreExit(const double score, const int raw_target, int &trail_
    return false;
 }
 
-int GetRsiDirectionLookback()
-{
-   if(RSIDirectionLookbackBars < 1)
-      return 1;
-   return RSIDirectionLookbackBars;
-}
-
-double GetRsiSidewaysDelta()
-{
-   return MathMax(0.0, RSISidewaysDelta);
-}
-
-bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &value);
-
-bool GetSumitRsiDirectionDelta(const int shift, double &delta)
-{
-   double sumit_curr = 0.0;
-   double sumit_prev = 0.0;
-   int lookback = GetRsiDirectionLookback();
-
-   if(!GetSumitIndicatorValue(0, shift, sumit_curr))
-      return false;
-   if(!GetSumitIndicatorValue(0, shift + lookback, sumit_prev))
-      return false;
-
-   delta = sumit_curr - sumit_prev;
-   return true;
-}
-
-bool IsRsiDirectionAllowed(const int mode, const double delta)
-{
-   if(mode <= 0)
-      return true;
-
-   double sideways_delta = GetRsiSidewaysDelta();
-   bool rising = (delta > sideways_delta);
-   bool falling = (delta < -sideways_delta);
-   bool sideways = (!rising && !falling);
-
-   switch(mode)
-   {
-      case 1: return (rising || sideways); // RisingOrSideways
-      case 2: return (falling || sideways); // FallingOrSideways
-      case 3: return rising; // RisingOnly
-      case 4: return falling; // FallingOnly
-      case 5: return sideways; // SidewaysOnly
-      default: return true;
-   }
-}
-
-bool GetSumitIndicatorValue(const int buffer_index, const int shift, double &value)
-{
-   if(sumitScoreHandle == INVALID_HANDLE)
-      return false;
-
-   double indicator_value[1];
-   int copied = CopyBuffer(sumitScoreHandle, buffer_index, shift, 1, indicator_value);
-   if(copied != 1)
-      return false;
-   if(indicator_value[0] == EMPTY_VALUE)
-      return false;
-
-   value = indicator_value[0];
-   return true;
-}
-
 int GetSuperTrendDirection(const int shift)
 {
    if(supertrendH1Handle == INVALID_HANDLE)
@@ -506,61 +441,6 @@ int GetSuperTrendDirection(const int shift)
       return -1;
 
    return 0;
-}
-
-bool IsSuperTrendBullishH1(const int shift)
-{
-   return (GetSuperTrendDirection(shift) > 0);
-}
-
-bool IsSuperTrendBearishH1(const int shift)
-{
-   return (GetSuperTrendDirection(shift) < 0);
-}
-
-bool IsLastCandleBreakConditionMet(const double price, const string break_input, const string type_input, const bool is_buy)
-{
-   string break_mode = break_input;
-   StringTrimLeft(break_mode);
-   StringTrimRight(break_mode);
-   StringToUpper(break_mode);
-   if(break_mode == "" || break_mode == "0")
-      return true;
-
-   string type_mode = type_input;
-   StringTrimLeft(type_mode);
-   StringTrimRight(type_mode);
-   StringToUpper(type_mode);
-
-   double prev_high = iHigh(_Symbol, PERIOD_CURRENT, 1);
-   double prev_low = iLow(_Symbol, PERIOD_CURRENT, 1);
-   double prev_open = iOpen(_Symbol, PERIOD_CURRENT, 1);
-   double prev_close = iClose(_Symbol, PERIOD_CURRENT, 1);
-
-   if(prev_high <= 0.0 || prev_low <= 0.0 || prev_open <= 0.0 || prev_close <= 0.0)
-      return false;
-
-   if(type_mode == "G" && prev_close <= prev_open)
-      return false;
-   if(type_mode == "R" && prev_close >= prev_open)
-      return false;
-
-   double break_level = 0.0;
-   if(break_mode == "H")
-      break_level = prev_high;
-   else if(break_mode == "L")
-      break_level = prev_low;
-   else if(break_mode == "O")
-      break_level = prev_open;
-   else if(break_mode == "C")
-      break_level = prev_close;
-   else
-      return true; // Invalid value behaves like disabled
-
-   if(is_buy)
-      return (price < break_level);
-
-   return (price > break_level);
 }
 
 bool IsManagedPosition(const ulong magic, const int position_type)
@@ -610,7 +490,7 @@ void UpdateLastEntryFromOpenBuy()
 
 void EnsureServerTargetsForOpenPositionsBuy(const bool hedging)
 {
-   if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
+   if(!SetTargetWithEntry || !RecoverExistingMagicPositions || !IsTargetExitEnabled())
       return;
 
    int ptotal = PositionsTotal();
@@ -657,7 +537,6 @@ void SyncTranchesBuy(const bool hedging)
          if(!PositionSelectByTicket(buy_tranches[i].ticket))
          {
             buy_tranches[i].closed = true;
-            buy_last_entry_price_ref = buy_tranches[i].entry_price;
          }
       }
    }
@@ -688,8 +567,6 @@ void SyncTranchesBuy(const bool hedging)
       {
          for(int i = 0; i < total; i++)
          {
-            if(!buy_tranches[i].closed)
-               buy_last_entry_price_ref = buy_tranches[i].entry_price;
             buy_tranches[i].closed = true;
          }
       }
@@ -756,8 +633,6 @@ void RebuildTranchesFromPositionsBuy(const bool hedging)
    }
 
    UpdateLastEntryFromOpenBuy();
-   if(buy_last_entry_price_open > 0.0)
-      buy_last_entry_price_ref = buy_last_entry_price_open;
 }
 
 bool AddTrancheBuy(const double entry_price, const double volume, const ulong ticket, const double target_price = 0.0)
@@ -779,12 +654,14 @@ bool AddTrancheBuy(const double entry_price, const double volume, const ulong ti
 
    buy_last_entry_price_open = entry_price;
    buy_last_entry_lot = volume;
-   buy_last_entry_price_ref = entry_price;
    return true;
 }
 
 void CheckTargetsBuy(const bool hedging, const double current_price)
 {
+   if(!IsTargetExitEnabled())
+      return;
+
    int total = ArraySize(buy_tranches);
    if(total == 0)
       return;
@@ -846,7 +723,6 @@ void CheckTargetsBuy(const bool hedging, const double current_price)
 
       if(closed_now)
       {
-         buy_last_entry_price_ref = buy_tranches[i].entry_price;
          buy_tranches[i].closed = true;
       }
    }
@@ -871,7 +747,7 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
 
    string comment = StringFormat("SB|lot=%.2f", vol);
    double request_target = 0.0;
-   if(SetTargetWithEntry)
+   if(SetTargetWithEntry && IsTargetExitEnabled())
       request_target = CalculateTargetPriceBuy(price);
 
    if(!trade.Buy(vol, _Symbol, 0, 0, request_target, comment))
@@ -893,9 +769,9 @@ bool TryOpenEntryBuy(const double price, const double lot, const bool hedging)
          ticket = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
    }
 
-   double tranche_target = CalculateTargetPriceBuy(entry_price);
+   double tranche_target = IsTargetExitEnabled() ? CalculateTargetPriceBuy(entry_price) : 0.0;
 
-   if(SetTargetWithEntry)
+   if(SetTargetWithEntry && tranche_target > 0.0)
    {
       bool can_verify_position = false;
       bool modified = true;
@@ -965,7 +841,7 @@ void UpdateLastEntryFromOpenSell()
 
 void EnsureServerTargetsForOpenPositionsSell(const bool hedging)
 {
-   if(!SetTargetWithEntry || !RecoverExistingMagicPositions)
+   if(!SetTargetWithEntry || !RecoverExistingMagicPositions || !IsTargetExitEnabled())
       return;
 
    int ptotal = PositionsTotal();
@@ -1012,7 +888,6 @@ void SyncTranchesSell(const bool hedging)
          if(!PositionSelectByTicket(sell_tranches[i].ticket))
          {
             sell_tranches[i].closed = true;
-            sell_last_entry_price_ref = sell_tranches[i].entry_price;
          }
       }
    }
@@ -1043,8 +918,6 @@ void SyncTranchesSell(const bool hedging)
       {
          for(int i = 0; i < total; i++)
          {
-            if(!sell_tranches[i].closed)
-               sell_last_entry_price_ref = sell_tranches[i].entry_price;
             sell_tranches[i].closed = true;
          }
       }
@@ -1111,8 +984,6 @@ void RebuildTranchesFromPositionsSell(const bool hedging)
    }
 
    UpdateLastEntryFromOpenSell();
-   if(sell_last_entry_price_open > 0.0)
-      sell_last_entry_price_ref = sell_last_entry_price_open;
 }
 
 bool AddTrancheSell(const double entry_price, const double volume, const ulong ticket, const double target_price = 0.0)
@@ -1134,12 +1005,14 @@ bool AddTrancheSell(const double entry_price, const double volume, const ulong t
 
    sell_last_entry_price_open = entry_price;
    sell_last_entry_lot = volume;
-   sell_last_entry_price_ref = entry_price;
    return true;
 }
 
 void CheckTargetsSell(const bool hedging, const double current_price)
 {
+   if(!IsTargetExitEnabled())
+      return;
+
    int total = ArraySize(sell_tranches);
    if(total == 0)
       return;
@@ -1201,7 +1074,6 @@ void CheckTargetsSell(const bool hedging, const double current_price)
 
       if(closed_now)
       {
-         sell_last_entry_price_ref = sell_tranches[i].entry_price;
          sell_tranches[i].closed = true;
       }
    }
@@ -1226,7 +1098,7 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 
    string comment = StringFormat("SS|lot=%.2f", vol);
    double request_target = 0.0;
-   if(SetTargetWithEntry)
+   if(SetTargetWithEntry && IsTargetExitEnabled())
       request_target = CalculateTargetPriceSell(price);
 
    if(!trade.Sell(vol, _Symbol, 0, 0, request_target, comment))
@@ -1248,9 +1120,9 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
          ticket = (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
    }
 
-   double tranche_target = CalculateTargetPriceSell(entry_price);
+   double tranche_target = IsTargetExitEnabled() ? CalculateTargetPriceSell(entry_price) : 0.0;
 
-   if(SetTargetWithEntry)
+   if(SetTargetWithEntry && tranche_target > 0.0)
    {
       bool can_verify_position = false;
       bool modified = true;
@@ -1287,121 +1159,59 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 //+------------------------------------------------------------------+
 //| Trading flow per side                                            |
 //+------------------------------------------------------------------+
-void ProcessBuy(const bool hedging, const double bid, const double ask, const double score, const double score2, const bool has_rsi_direction, const double rsi_direction_delta)
+void ProcessBuyScaleIns(const bool hedging, const double bid, const double ask, const double score1, const double score2, const int st_direction)
 {
-   if(!BuyEntry)
+   if(!BuyEntry || st_direction <= 0)
       return;
 
-   if(UseSuperTrend && !IsSuperTrendBullishH1(1))
+   if(OpenTrancheCountBuy() <= 0)
       return;
-   if(BuyRSIDirectionMode > 0)
+   if(OpenTrancheCountSell() > 0)
+      return;
+   if(!IsBuyEntryScoreConditionMet(score1, score2))
+      return;
+
+   if(buy_last_entry_price_open > 0.0)
    {
-      if(!has_rsi_direction)
+      double step_distance = CalculateStepDistance(buy_last_entry_price_open);
+      if(step_distance <= 0.0)
          return;
-      if(!IsRsiDirectionAllowed(BuyRSIDirectionMode, rsi_direction_delta))
-         return;
-   }
-
-   int openCount = OpenTrancheCountBuy();
-   int scoreTrigger = NormalizeScoreLevel(BUYEntryScore);
-   int scoreTrigger2 = NormalizeScoreLevel(BUYEntryScore2);
-   bool scoreOk = (score <= scoreTrigger);
-   bool score2Ok = (score2 <= scoreTrigger2);
-   bool entryOk = (scoreOk && score2Ok);
-
-   if(openCount == 0)
-   {
-      if(!entryOk)
+      if(bid > (buy_last_entry_price_open - step_distance))
          return;
 
-      if(!IsLastCandleBreakConditionMet(bid, chk_last_candle_breaks_buy, chk_last_candle_type_buy, true))
-         return;
-
-      if(buy_last_entry_price_ref > 0.0)
-      {
-         if(MathAbs(bid - buy_last_entry_price_ref) < CalculateStepDistance(buy_last_entry_price_ref))
-            return;
-      }
-
-      TryOpenEntryBuy(ask, BuyLotSize, hedging);
-      return;
-   }
-
-   if(BuyMaxEntries > 0 && openCount >= BuyMaxEntries)
-      return;
-
-   if(!entryOk)
-      return;
-
-   if(!IsLastCandleBreakConditionMet(bid, chk_last_candle_breaks_buy, chk_last_candle_type_buy, true))
-      return;
-
-   if(buy_last_entry_price_open > 0.0 && bid <= (buy_last_entry_price_open - CalculateStepDistance(buy_last_entry_price_open)))
-   {
-      double nextLot = buy_last_entry_lot;
-      if(nextLot <= 0.0)
-         nextLot = BuyLotSize;
-      nextLot += BuyLotStep;
-      TryOpenEntryBuy(ask, nextLot, hedging);
+      double next_lot = buy_last_entry_lot;
+      if(next_lot <= 0.0)
+         next_lot = LotSize;
+      next_lot += LotStep;
+      TryOpenEntryBuy(ask, next_lot, hedging);
    }
 }
 
-void ProcessSell(const bool hedging, const double bid, const double ask, const double score, const double score2, const bool has_rsi_direction, const double rsi_direction_delta)
+void ProcessSellScaleIns(const bool hedging, const double bid, const double ask, const double score1, const double score2, const int st_direction)
 {
-   if(!SellEntry)
+   if(!SellEntry || st_direction >= 0)
       return;
 
-   if(UseSuperTrend && !IsSuperTrendBearishH1(1))
+   if(OpenTrancheCountSell() <= 0)
       return;
-   if(SellRSIDirectionMode > 0)
+   if(OpenTrancheCountBuy() > 0)
+      return;
+   if(!IsSellEntryScoreConditionMet(score1, score2))
+      return;
+
+   if(sell_last_entry_price_open > 0.0)
    {
-      if(!has_rsi_direction)
+      double step_distance = CalculateStepDistance(sell_last_entry_price_open);
+      if(step_distance <= 0.0)
          return;
-      if(!IsRsiDirectionAllowed(SellRSIDirectionMode, rsi_direction_delta))
-         return;
-   }
-
-   int openCount = OpenTrancheCountSell();
-   int scoreTrigger = NormalizeScoreLevel(SELLEntryScore);
-   int scoreTrigger2 = NormalizeScoreLevel(SELLEntryScore2);
-   bool scoreOk = (score >= scoreTrigger);
-   bool score2Ok = (score2 >= scoreTrigger2);
-   bool entryOk = (scoreOk && score2Ok);
-
-   if(openCount == 0)
-   {
-      if(!entryOk)
+      if(ask < (sell_last_entry_price_open + step_distance))
          return;
 
-      if(!IsLastCandleBreakConditionMet(ask, chk_last_candle_breaks_sell, chk_last_candle_type_sell, false))
-         return;
-
-      if(sell_last_entry_price_ref > 0.0)
-      {
-         if(MathAbs(ask - sell_last_entry_price_ref) < CalculateStepDistance(sell_last_entry_price_ref))
-            return;
-      }
-
-      TryOpenEntrySell(bid, SellLotSize, hedging);
-      return;
-   }
-
-   if(SellMaxEntries > 0 && openCount >= SellMaxEntries)
-      return;
-
-   if(!entryOk)
-      return;
-
-   if(!IsLastCandleBreakConditionMet(ask, chk_last_candle_breaks_sell, chk_last_candle_type_sell, false))
-      return;
-
-   if(sell_last_entry_price_open > 0.0 && ask >= (sell_last_entry_price_open + CalculateStepDistance(sell_last_entry_price_open)))
-   {
-      double nextLot = sell_last_entry_lot;
-      if(nextLot <= 0.0)
-         nextLot = SellLotSize;
-      nextLot += SellLotStep;
-      TryOpenEntrySell(bid, nextLot, hedging);
+      double next_lot = sell_last_entry_lot;
+      if(next_lot <= 0.0)
+         next_lot = LotSize;
+      next_lot += LotStep;
+      TryOpenEntrySell(bid, next_lot, hedging);
    }
 }
 
@@ -1506,12 +1316,17 @@ void ApplyScoreAndIndicatorExits(const bool hedging, const double score, const d
    }
 }
 
-void ApplySupertrendBasedSL(const bool hedging)
+void HandleSupertrendFlipEntryExit(const bool hedging,
+                                   const int current_direction,
+                                   const double bid,
+                                   const double ask,
+                                   const bool has_scores,
+                                   const double score1,
+                                   const double score2)
 {
-   if(!UseSuperTrend || !SupetrendBasedSL || supertrendH1Handle == INVALID_HANDLE)
+   if(!UseSuperTrend || supertrendH1Handle == INVALID_HANDLE)
       return;
 
-   int current_direction = GetSuperTrendDirection(1);
    if(current_direction == 0)
       return;
 
@@ -1527,12 +1342,38 @@ void ApplySupertrendBasedSL(const bool hedging)
    if(current_direction > 0)
    {
       if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
+      {
          SyncTranchesSell(hedging);
+         ResetSellScoreTrailState();
+         ResetSellScore2TrailState();
+      }
+
+      if(BuyEntry &&
+         OpenTrancheCountSell() == 0 &&
+         OpenTrancheCountBuy() == 0 &&
+         has_scores &&
+         IsBuyEntryScoreConditionMet(score1, score2))
+      {
+         TryOpenEntryBuy(ask, LotSize, hedging);
+      }
    }
    else
    {
       if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
+      {
          SyncTranchesBuy(hedging);
+         ResetBuyScoreTrailState();
+         ResetBuyScore2TrailState();
+      }
+
+      if(SellEntry &&
+         OpenTrancheCountBuy() == 0 &&
+         OpenTrancheCountSell() == 0 &&
+         has_scores &&
+         IsSellEntryScoreConditionMet(score1, score2))
+      {
+         TryOpenEntrySell(bid, LotSize, hedging);
+      }
    }
 
    supertrend_last_direction = current_direction;
@@ -1570,7 +1411,7 @@ int OnInit()
 
    sumitScoreHandle = iCustom(
       _Symbol,
-      PERIOD_CURRENT,
+      SumitScore_1Period,
       "Sumit_RSI_Score_Indicator",
       Rsi1hPeriod,
       Sumit_MaBuy,
@@ -1636,20 +1477,21 @@ int OnInit()
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
    PrintFormat("Price format: digits=%d point=%.10f pip=%.10f", g_digits, g_point, g_pip);
-   PrintFormat("Mode: SetTargetWithEntry=%s TargetPercent=%.4f UpDownStep=%.4f TrailingTargetPercent=%.4f EntryScoreSLTrail=%s RecoverExistingMagicPositions=%s",
+   PrintFormat("Mode: SetTargetWithEntry=%s TargetPercent=%.4f TargetEnabled=%s UpDownStep=%.4f TrailingTargetPercent=%.4f EntryScoreSLTrail=%s RecoverExistingMagicPositions=%s",
                SetTargetWithEntry ? "true" : "false",
                TargetPercent,
+               IsTargetExitEnabled() ? "true" : "false",
                UpDownStep,
                TrailingTargetPercent,
                EntryScoreSLTrail ? "true" : "false",
                RecoverExistingMagicPositions ? "true" : "false");
-   PrintFormat("Score2 timeframe: %s", EnumToString(SumitScore_2Period));
+   PrintFormat("Score timeframes: score1=%s score2=%s", EnumToString(SumitScore_1Period), EnumToString(SumitScore_2Period));
+   PrintFormat("SuperTrend timeframe: %s", EnumToString(Supertrend_Timeframe));
    PrintFormat("BUY thresholds: entry(score1<=%d,score2<=%d) exit(score1>=%d,score2>=%d)",
                BUYEntryScore, BUYEntryScore2, BUYExitScore, BUYExitScore2);
    PrintFormat("SELL thresholds: entry(score1>=%d,score2>=%d) exit(score1<=%d,score2<=%d)",
                SELLEntryScore, SELLEntryScore2, SELLExitScore, SELLExitScore2);
-   PrintFormat("RSI direction: BuyMode=%d SellMode=%d Lookback=%d SidewaysDelta=%.2f",
-               BuyRSIDirectionMode, SellRSIDirectionMode, GetRsiDirectionLookback(), GetRsiSidewaysDelta());
+   PrintFormat("Entry lot config: base=%.4f step=%.4f", LotSize, LotStep);
    PrintFormat("Side config: BuyEntry=%s SellEntry=%s BuyMagic=%I64u SellMagic=%I64u",
                BuyEntry ? "true" : "false",
                SellEntry ? "true" : "false",
@@ -1665,8 +1507,7 @@ int OnInit()
       RebuildTranchesFromPositionsSell(hedging);
    }
 
-   PrintFormat("Strategy uses external score + optional SuperTrend filters for both sides (timeframe=%s).",
-               EnumToString(Supertrend_Timeframe));
+   PrintFormat("Strategy: entry on ST flip + score1&score2, scale-ins by distance in same ST direction, exits by target/score/opposite ST flip.");
 
    return(INIT_SUCCEEDED);
 }
@@ -1697,30 +1538,15 @@ void OnTick()
    RebuildTranchesFromPositionsSell(hedging);
    EnsureServerTargetsForOpenPositionsBuy(hedging);
    EnsureServerTargetsForOpenPositionsSell(hedging);
-   ApplySupertrendBasedSL(hedging);
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-
-   int score_shift = UseNewBar ? 1 : 0;
-   double score = EMPTY_VALUE;
-   double score2 = EMPTY_VALUE;
-   double rsi_direction_delta = 0.0;
-   bool has_score = GetScoreValue(score_shift, score);
-   bool has_score2 = GetScore2Value(score_shift, score2);
-   bool need_rsi_direction = (BuyRSIDirectionMode > 0 || SellRSIDirectionMode > 0);
-   bool has_rsi_direction = true;
-   if(need_rsi_direction)
-      has_rsi_direction = GetSumitRsiDirectionDelta(score_shift, rsi_direction_delta);
 
    if(!SetTargetWithEntry)
    {
       CheckTargetsBuy(hedging, bid);
       CheckTargetsSell(hedging, ask);
    }
-
-   if(has_score && has_score2)
-      ApplyScoreAndIndicatorExits(hedging, score, score2);
 
    if(UseNewBar)
    {
@@ -1730,12 +1556,28 @@ void OnTick()
       last_bar_time = bar_time;
    }
 
-   if(!has_score || !has_score2)
+   int score_shift = UseNewBar ? 1 : 0;
+   double score1 = EMPTY_VALUE;
+   double score2 = EMPTY_VALUE;
+   bool has_score1 = GetScoreValue(score_shift, score1);
+   bool has_score2 = GetScore2Value(score_shift, score2);
+   bool has_scores = (has_score1 && has_score2);
+
+   if(has_scores)
+      ApplyScoreAndIndicatorExits(hedging, score1, score2);
+
+   if(!UseSuperTrend || supertrendH1Handle == INVALID_HANDLE)
       return;
 
-   if(need_rsi_direction && !has_rsi_direction)
+   int st_direction = GetSuperTrendDirection(1);
+   if(st_direction == 0)
       return;
 
-   ProcessBuy(hedging, bid, ask, score, score2, has_rsi_direction, rsi_direction_delta);
-   ProcessSell(hedging, bid, ask, score, score2, has_rsi_direction, rsi_direction_delta);
+   HandleSupertrendFlipEntryExit(hedging, st_direction, bid, ask, has_scores, score1, score2);
+
+   if(!has_scores)
+      return;
+
+   ProcessBuyScaleIns(hedging, bid, ask, score1, score2, st_direction);
+   ProcessSellScaleIns(hedging, bid, ask, score1, score2, st_direction);
 }
