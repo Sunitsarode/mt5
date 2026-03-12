@@ -47,7 +47,7 @@ input int SELLExitScore = 50;
 input int SELLExitScore2 = 0;
 input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
 input double TargetPercent = 0.075;
-input bool STBasedExit = false;
+input bool STBasedExit = true;
 input bool SetTargetWithEntry = true;   // broker-side TP set with entry
 input double TrailingTargetPercent = 0.0; // 0 disables trailing mode
 
