@@ -5,7 +5,8 @@
 // -------15 min ---                                  -------------
 //     current   -------                        ------
 //                  -----------        ----------------  
-//                     10-10  ----BUY---   if (Supertrend = bullish) 
+//                     10-10  ----BUY---   if (Supertrend == bullish)
+// Exit : when score = 50 || when target == Reached || when supertrend flipped 
 //+------------------------------------------------------------------+
 #property copyright "Strategy EA"
 #property version   "1.00"
@@ -14,46 +15,49 @@
 #include <Trade/Trade.mqh>
 
 input group "Indicator - Sumit RSI Score"
-input int Rsi1hPeriod = 51;
-input int Sumit_MaBuy = 30;
-input int Sumit_MaSell = 70;
-input int Rsi1hBuy = 40;
-input int Rsi1hSell = 60;
-input int SumitSma3Period = 3;
-input int SumitSma201Period = 201;
-input int SumitRsiPeriod = 7;
+int Rsi1hPeriod = 51;
+ int Sumit_MaBuy = 30;
+ int Sumit_MaSell = 70;
+ int Rsi1hBuy = 40;
+ int Rsi1hSell = 60;
+ int SumitSma3Period = 3;
+ int SumitSma201Period = 201;
+ int SumitRsiPeriod = 7;
 input ENUM_TIMEFRAMES SumitScore_1Period = PERIOD_M15;
 input ENUM_TIMEFRAMES SumitScore_2Period = PERIOD_M15;
 
-input group "Entry - Supertrend Flip"
+input group "Entry - Conditions"
 input bool BuyEntry = true;
 input bool SellEntry = true;
 input int BUYEntryScore = 30;
 input int BUYEntryScore2 = 30;
 input int SELLEntryScore = 70;
 input int SELLEntryScore2 = 70;
+
+input bool STBasedEntry = false;
 input double LotSize = 0.01;
 input double LotStep = 0.01;
 input double UpDownStep = 0.025;
 input bool UseNewBar = false;
 
-input group "Exit - Score Based (0 = disabled)"
+input group "Exit-Conditions (0 = disabled)"
 input int BUYExitScore = 50;
 input int BUYExitScore2 = 0;
 input int SELLExitScore = 50;
 input int SELLExitScore2 = 0;
 input bool EntryScoreSLTrail = true;    // trail score exits in 10-point steps
 input double TargetPercent = 0.075;
+input bool STBasedExit = false;
 input bool SetTargetWithEntry = true;   // broker-side TP set with entry
 input double TrailingTargetPercent = 0.0; // 0 disables trailing mode
 
 input group "Indicator - Supertrend"
 input bool UseSuperTrend = true;
-input int SupertrendAtrPeriod = 7;
-input double SupertrendMultiplier = 2.1;
+ int SupertrendAtrPeriod = 7;
+ double SupertrendMultiplier = 2.1;
 input ENUM_TIMEFRAMES Supertrend_Timeframe = PERIOD_M15;
-input ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
-input bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
+ ENUM_APPLIED_PRICE SupertrendSourcePrice = PRICE_MEDIAN; // PRICE_CLOSE, PRICE_OPEN, PRICE_HIGH, PRICE_LOW, PRICE_MEDIAN, PRICE_TYPICAL, PRICE_WEIGHTED
+ bool SupertrendTakeWicksIntoAccount = false; // true=use wick highs/lows, false=use candle body values
 
 input group "Risk / Execution"
 input ulong BuyMagicNumber = 1051;
@@ -1161,7 +1165,8 @@ bool TryOpenEntrySell(const double price, const double lot, const bool hedging)
 //+------------------------------------------------------------------+
 void ProcessBuyScaleIns(const bool hedging, const double bid, const double ask, const double score1, const double score2, const int st_direction)
 {
-   if(!BuyEntry || st_direction <= 0)
+   // if STBasedEntry is enabled we require a bullish SuperTrend direction
+   if(!BuyEntry || (STBasedEntry && st_direction <= 0))
       return;
 
    if(OpenTrancheCountBuy() <= 0)
@@ -1189,7 +1194,8 @@ void ProcessBuyScaleIns(const bool hedging, const double bid, const double ask, 
 
 void ProcessSellScaleIns(const bool hedging, const double bid, const double ask, const double score1, const double score2, const int st_direction)
 {
-   if(!SellEntry || st_direction >= 0)
+   // if STBasedEntry is enabled we require a bearish SuperTrend direction
+   if(!SellEntry || (STBasedEntry && st_direction >= 0))
       return;
 
    if(OpenTrancheCountSell() <= 0)
@@ -1332,47 +1338,60 @@ void HandleSupertrendFlipEntryExit(const bool hedging,
 
    if(supertrend_last_direction == 0)
    {
+      // first direction read – just store and exit
       supertrend_last_direction = current_direction;
       return;
    }
 
    if(current_direction == supertrend_last_direction)
-      return;
+      return; // no flip occurred
 
-   if(current_direction > 0)
+   // flip detected; handle exit and entry separately according to flags
+   if(STBasedExit)
    {
-      if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
+      if(current_direction > 0)
       {
-         SyncTranchesSell(hedging);
-         ResetSellScoreTrailState();
-         ResetSellScore2TrailState();
+         if(CloseAllManagedPositions(SellMagicNumber, POSITION_TYPE_SELL, "SuperTrend flipped bullish: closing sells") > 0)
+         {
+            SyncTranchesSell(hedging);
+            ResetSellScoreTrailState();
+            ResetSellScore2TrailState();
+         }
       }
-
-      if(BuyEntry &&
-         OpenTrancheCountSell() == 0 &&
-         OpenTrancheCountBuy() == 0 &&
-         has_scores &&
-         IsBuyEntryScoreConditionMet(score1, score2))
+      else
       {
-         TryOpenEntryBuy(ask, LotSize, hedging);
+         if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
+         {
+            SyncTranchesBuy(hedging);
+            ResetBuyScoreTrailState();
+            ResetBuyScore2TrailState();
+         }
       }
    }
-   else
-   {
-      if(CloseAllManagedPositions(BuyMagicNumber, POSITION_TYPE_BUY, "SuperTrend flipped bearish: closing buys") > 0)
-      {
-         SyncTranchesBuy(hedging);
-         ResetBuyScoreTrailState();
-         ResetBuyScore2TrailState();
-      }
 
-      if(SellEntry &&
-         OpenTrancheCountBuy() == 0 &&
-         OpenTrancheCountSell() == 0 &&
-         has_scores &&
-         IsSellEntryScoreConditionMet(score1, score2))
+   if(STBasedEntry)
+   {
+      if(current_direction > 0)
       {
-         TryOpenEntrySell(bid, LotSize, hedging);
+         if(BuyEntry &&
+            OpenTrancheCountSell() == 0 &&
+            OpenTrancheCountBuy() == 0 &&
+            has_scores &&
+            IsBuyEntryScoreConditionMet(score1, score2))
+         {
+            TryOpenEntryBuy(ask, LotSize, hedging);
+         }
+      }
+      else
+      {
+         if(SellEntry &&
+            OpenTrancheCountBuy() == 0 &&
+            OpenTrancheCountSell() == 0 &&
+            has_scores &&
+            IsSellEntryScoreConditionMet(score1, score2))
+         {
+            TryOpenEntrySell(bid, LotSize, hedging);
+         }
       }
    }
 
@@ -1477,7 +1496,9 @@ int OnInit()
    PrintFormat("Volume constraints for %s: min=%.4f step=%.4f max=%.4f",
                _Symbol, g_vol_min, g_vol_step, g_vol_max);
    PrintFormat("Price format: digits=%d point=%.10f pip=%.10f", g_digits, g_point, g_pip);
-   PrintFormat("Mode: SetTargetWithEntry=%s TargetPercent=%.4f TargetEnabled=%s UpDownStep=%.4f TrailingTargetPercent=%.4f EntryScoreSLTrail=%s RecoverExistingMagicPositions=%s",
+   PrintFormat("Mode: STBasedEntry=%s STBasedExit=%s SetTargetWithEntry=%s TargetPercent=%.4f TargetEnabled=%s UpDownStep=%.4f TrailingTargetPercent=%.4f EntryScoreSLTrail=%s RecoverExistingMagicPositions=%s",
+               STBasedEntry ? "true" : "false",
+               STBasedExit ? "true" : "false",
                SetTargetWithEntry ? "true" : "false",
                TargetPercent,
                IsTargetExitEnabled() ? "true" : "false",
@@ -1507,7 +1528,9 @@ int OnInit()
       RebuildTranchesFromPositionsSell(hedging);
    }
 
-   PrintFormat("Strategy: entry on ST flip + score1&score2, scale-ins by distance in same ST direction, exits by target/score/opposite ST flip.");
+   PrintFormat("Strategy: entry on %s, scale-ins by distance in same ST direction, exits by target/score%s.",
+               STBasedEntry ? "ST flip + score1&score2" : "score1&score2",
+               STBasedExit ? " and opposite ST flip" : "");
 
    return(INIT_SUCCEEDED);
 }
@@ -1573,7 +1596,9 @@ void OnTick()
    if(st_direction == 0)
       return;
 
-   HandleSupertrendFlipEntryExit(hedging, st_direction, bid, ask, has_scores, score1, score2);
+   // only perform flips if either entry or exit uses ST
+   if(STBasedEntry || STBasedExit)
+      HandleSupertrendFlipEntryExit(hedging, st_direction, bid, ask, has_scores, score1, score2);
 
    if(!has_scores)
       return;
